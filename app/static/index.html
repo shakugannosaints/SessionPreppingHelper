@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>备团助手</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/axios@1.7.2/dist/axios.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+</head>
+<body>
+  <header>
+    <h1>备团助手</h1>
+    <div class="actions">
+      <button id="btn-new-node">新建节点</button>
+      <select id="template-select"></select>
+      <button id="btn-apply-template">用模板创建</button>
+      <input id="search" placeholder="搜索关键字" />
+  <span class="muted">（可用 关键词 或 键:值）</span>
+      <button id="btn-layout">自动布局</button>
+  <button id="btn-duplicate" title="复制选中节点 (Ctrl+Shift+K)">复制节点</button>
+  <label class="toggle"><input type="checkbox" id="toggle-edge-labels"> 显示连线文本</label>
+      <select id="rel-filter">
+        <option value="">自动关联：全部字段</option>
+        <option value="地点">只看地点</option>
+        <option value="标签">只看标签</option>
+      </select>
+  <button id="btn-undo" title="撤销 (Ctrl+Z)">撤销</button>
+  <button id="btn-redo" title="重做 (Ctrl+Y)">重做</button>
+  <button id="btn-export">导出 JSON</button>
+  <button id="btn-export-csv">导出 CSV</button>
+  <button id="btn-export-md">导出 Markdown</button>
+      <label class="import">
+        导入 JSON <input type="file" id="import-json" accept="application/json" />
+      </label>
+      <label class="import">
+        导入 CSV <input type="file" id="import-csv" accept="text/csv,.csv" />
+      </label>
+    </div>
+  </header>
+  <main>
+    <aside>
+      <h3>节点编辑</h3>
+      <div id="node-editor">
+        <div class="hint">选择图中的一个节点以编辑字段。</div>
+      </div>
+      <h3>手动关联</h3>
+      <div>
+        <button id="btn-start-link">选择两个节点建连</button>
+        <div id="link-status" class="muted"></div>
+      </div>
+  <h3>被隐藏的自动关联</h3>
+  <div id="suppressed-list" class="muted">无</div>
+    </aside>
+    <div id="resizer" class="resizer" title="拖动调整宽度"></div>
+    <section id="graph"></section>
+  </main>
+
+  <script src="/static/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+# VS Code REST Client or HTTPYac compatible quick checks
+
+### Get data
+GET http://127.0.0.1:5000/api/data
+
+### Create node
+POST http://127.0.0.1:5000/api/nodes
+Content-Type: application/json
+
+{
+  "fields": [
+    {"key": "名称", "type": "text", "value": "林清秋"},
+    {"key": "标签", "type": "tag", "value": "NPC"},
+    {"key": "地点", "type": "text", "value": "邮局"}
+  ]
+}
+
+### Get data (filter by 地点)
+GET http://127.0.0.1:5000/api/data?field=%E5%9C%B0%E7%82%B9
