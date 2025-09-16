@@ -20,6 +20,7 @@
 - 导入导出：JSON（全量）、CSV（节点字段明细）、Markdown（可读报告）。
 - 撤销/重做：按钮与快捷键（Ctrl+Z / Ctrl+Y），历史保存在内存（重启后清空）。
 - 本地持久化：数据在内存缓存，延迟落盘到 `app/data.json`（原子写入 + 重试 + 自动修复）；模板在 `app/templates.json`。
+- 聚焦模式：双击某节点进入聚焦模式，点击空白处离开。
 
 ## 运行环境
 
@@ -116,3 +117,4 @@ http://127.0.0.1:5000/
 - 后端：Flask，见 `app/main.py`。
 - 数据存储：JSON 文件，见 `app/storage.py`。
 - 前端：原生 HTML/JS + Cytoscape.js，见 `app/static/`。
+
