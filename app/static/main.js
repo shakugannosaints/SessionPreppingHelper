@@ -4,6 +4,11 @@ let linkPick = [];
 let sidebarWidth = 320;
 // in-memory curvature overrides (for auto edges or session-only)
 const edgeCpd = new Map();
+// 聚焦模式状态：仅当双击同一节点后才进入
+let focusNodeId = null;
+let lastTapNodeId = null;
+let lastTapTime = 0;
+const DOUBLE_TAP_MS = 350;
 
 function mapNode(n) {
   const colors = n.style?.colors || ["#9CA3AF"]; 
@@ -100,7 +105,19 @@ function renderGraph(nodes, edges) {
       linkPick.push(n.id());
       finishLinkPick();
     }
-  updateFocusBySelection();
+    // 双击检测：仅双击同一节点才进入聚焦模式
+    const now = Date.now();
+    if (lastTapNodeId === n.id() && (now - lastTapTime) <= DOUBLE_TAP_MS) {
+      focusNodeId = n.id();
+      updateFocusBySelection();
+      // 重置双击状态，避免三连击误触
+      lastTapNodeId = null;
+      lastTapTime = 0;
+    } else {
+      lastTapNodeId = n.id();
+      lastTapTime = now;
+      // 单击不改变聚焦状态（保持当前聚焦或无聚焦）
+    }
   });
 
   cy.on('position', 'node', async (evt) => {
@@ -135,6 +152,7 @@ function renderGraph(nodes, edges) {
     if (evt.target === cy) {
       cy.elements().unselect();
       selectedNode = null;
+  focusNodeId = null; // 仅空白点击才退出聚焦
       const el = document.getElementById('node-editor');
       if (el) el.innerHTML = '<div class="hint">选择图中的一个节点以编辑字段。</div>';
       updateFocusBySelection();
@@ -652,13 +670,20 @@ function getViewportCenter() {
 
 function updateFocusBySelection() {
   if (!cy) return;
-  const sel = cy.nodes(':selected');
   cy.batch(() => {
+    // 先清除淡化
     cy.nodes().removeClass('faded');
     cy.edges().removeClass('faded');
-    if (!sel || sel.length === 0) return;
-    // 只高亮选中节点与其邻域，其他全部淡化
-    const neighborhood = sel.closedNeighborhood(); // 包含自身、邻居节点和边
+    // 未处于聚焦模式，直接返回
+    if (!focusNodeId) return;
+    const node = cy.getElementById(focusNodeId);
+    if (!node || node.empty() || node.style('display') === 'none') {
+      // 聚焦节点不存在或被隐藏，则退出聚焦模式
+      focusNodeId = null;
+      return;
+    }
+    // 只高亮聚焦节点与其邻域，其他全部淡化
+    const neighborhood = node.closedNeighborhood();
     const nbSet = new Set(neighborhood.map(e => e.id()));
     cy.nodes().forEach(n => { if (!nbSet.has(n.id())) n.addClass('faded'); });
     cy.edges().forEach(e => { if (!nbSet.has(e.id())) e.addClass('faded'); });
