@@ -427,6 +427,17 @@ async function bootstrap() {
   }
 
   document.getElementById('rel-filter').onchange = refresh;
+  // 聚焦层数输入变更
+  const depthInput = document.getElementById('focus-depth');
+  if (depthInput && !depthInput.dataset.bound) {
+    depthInput.dataset.bound = '1';
+    depthInput.addEventListener('change', () => {
+      // 合法化
+      const v = Math.max(1, parseInt(depthInput.value || '1', 10) || 1);
+      depthInput.value = String(v);
+      updateFocusBySelection();
+    });
+  }
 
   // 撤销/重做按钮
   document.getElementById('btn-undo').onclick = async () => {
@@ -682,11 +693,42 @@ function updateFocusBySelection() {
       focusNodeId = null;
       return;
     }
-    // 只高亮聚焦节点与其邻域，其他全部淡化
-    const neighborhood = node.closedNeighborhood();
-    const nbSet = new Set(neighborhood.map(e => e.id()));
-    cy.nodes().forEach(n => { if (!nbSet.has(n.id())) n.addClass('faded'); });
-    cy.edges().forEach(e => { if (!nbSet.has(e.id())) e.addClass('faded'); });
+    // 读取层数（默认 1 层），进行按层 BFS，遵循当前显示状态
+    const inp = document.getElementById('focus-depth');
+    const depth = Math.max(1, parseInt(inp?.value || '1', 10) || 1);
+
+    const visibleNodes = new Set();
+    cy.nodes().forEach(n => { if (n.style('display') !== 'none') visibleNodes.add(n.id()); });
+    const visibleEdges = cy.edges().filter(e => e.style('display') !== 'none');
+
+    const queue = [{ id: node.id(), d: 0 }];
+    const seen = new Set([node.id()]);
+    const keepNodes = new Set([node.id()]);
+    const keepEdges = new Set();
+
+    while (queue.length) {
+      const cur = queue.shift();
+      if (cur.d >= depth) continue;
+      // 从当前节点出发，考虑其可见邻接边与对端
+      visibleEdges.forEach(e => {
+        const s = e.data('source');
+        const t = e.data('target');
+        if (s === cur.id || t === cur.id) {
+          const other = (s === cur.id) ? t : s;
+          if (!visibleNodes.has(other)) return; // 对端被隐藏则忽略
+          keepEdges.add(e.id());
+          keepNodes.add(other);
+          if (!seen.has(other)) {
+            seen.add(other);
+            queue.push({ id: other, d: cur.d + 1 });
+          }
+        }
+      });
+    }
+
+    // 应用淡化：仅保留 keepNodes 与 keepEdges
+    cy.nodes().forEach(n => { if (!keepNodes.has(n.id())) n.addClass('faded'); });
+    cy.edges().forEach(e => { if (!keepEdges.has(e.id())) e.addClass('faded'); });
   });
 }
 
