@@ -70,6 +70,9 @@ function renderGraph(nodes, edges) {
   style: [
       { selector: 'node', style: { 'background-color': '#9CA3AF' } },
   { selector: 'edge', style: { 'curve-style': 'unbundled-bezier', 'edge-distances': 'node-position', 'line-color': '#CBD5E1', 'width': 2, 'label': 'data(label)', 'font-size': 10, 'text-background-opacity': 1, 'text-background-color': '#fff', 'text-background-padding': 2, 'target-arrow-shape': 'triangle', 'target-arrow-color': '#CBD5E1', 'control-point-distance': 'data(cpd)', 'control-point-weight': 0.5, 'text-rotation': 'autorotate' } },
+  // 聚焦模式：非邻域淡化
+  { selector: 'node.faded', style: { 'opacity': 0.15, 'text-opacity': 0.2 } },
+  { selector: 'edge.faded', style: { 'opacity': 0.12, 'text-opacity': 0.0 } },
   // 根据弧度方向微调文本，向上弯时上移 6px，向下弯时下移 6px
   { selector: 'edge[cpd > 0]', style: { 'text-margin-y': -6 } },
   { selector: 'edge[cpd < 0]', style: { 'text-margin-y': 6 } },
@@ -97,6 +100,7 @@ function renderGraph(nodes, edges) {
       linkPick.push(n.id());
       finishLinkPick();
     }
+  updateFocusBySelection();
   });
 
   cy.on('position', 'node', async (evt) => {
@@ -123,6 +127,17 @@ function renderGraph(nodes, edges) {
     if (confirm('隐藏这条自动关联？(可在左侧列表中恢复)')) {
       await axios.post('/api/auto/suppress', { a, b });
       await refresh();
+    }
+  });
+
+  // 点击空白处：取消选择并退出聚焦模式
+  cy.on('tap', (evt) => {
+    if (evt.target === cy) {
+      cy.elements().unselect();
+      selectedNode = null;
+      const el = document.getElementById('node-editor');
+      if (el) el.innerHTML = '<div class="hint">选择图中的一个节点以编辑字段。</div>';
+      updateFocusBySelection();
     }
   });
 
@@ -190,6 +205,8 @@ async function refresh() {
   window.__rawNodes = rawNodes;
   await renderSuppressed();
   await updateHistoryButtons();
+  // 渲染后根据当前选择应用聚焦态
+  updateFocusBySelection();
 }
 
 function editorHtml(node) {
@@ -478,6 +495,12 @@ async function bootstrap() {
         cy.nodes().style('display', 'element');
         cy.edges().style('display', 'element');
       });
+      // 清空搜索时，恢复显示 + 应用聚焦态
+      cy.batch(() => {
+        cy.nodes().style('display', 'element');
+        cy.edges().style('display', 'element');
+      });
+      updateFocusBySelection();
       return;
     }
 
@@ -538,6 +561,8 @@ async function bootstrap() {
         eh.style('display', visible ? 'element' : 'none');
       });
     });
+  // 过滤后也应用聚焦态
+  updateFocusBySelection();
   };
 
   document.getElementById('btn-start-link').onclick = () => {
@@ -623,6 +648,21 @@ function getViewportCenter() {
     const ry = h / 2;
     return { x: (rx - pan.x) / zoom, y: (ry - pan.y) / zoom };
   } catch { return null; }
+}
+
+function updateFocusBySelection() {
+  if (!cy) return;
+  const sel = cy.nodes(':selected');
+  cy.batch(() => {
+    cy.nodes().removeClass('faded');
+    cy.edges().removeClass('faded');
+    if (!sel || sel.length === 0) return;
+    // 只高亮选中节点与其邻域，其他全部淡化
+    const neighborhood = sel.closedNeighborhood(); // 包含自身、邻居节点和边
+    const nbSet = new Set(neighborhood.map(e => e.id()));
+    cy.nodes().forEach(n => { if (!nbSet.has(n.id())) n.addClass('faded'); });
+    cy.edges().forEach(e => { if (!nbSet.has(e.id())) e.addClass('faded'); });
+  });
 }
 
 function applyEdgeLabelVisibility(show) {
