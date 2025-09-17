@@ -14,6 +14,7 @@
   <header>
     <h1>备团助手</h1>
     <div class="actions">
+      <button id="btn-new-canvas" title="新建画布/清空当前">新建画布</button>
       <button id="btn-new-node">新建节点</button>
       <select id="template-select"></select>
       <button id="btn-apply-template">用模板创建</button>
@@ -33,15 +34,21 @@
       </select>
   <button id="btn-undo" title="撤销 (Ctrl+Z)">撤销</button>
   <button id="btn-redo" title="重做 (Ctrl+Y)">重做</button>
-  <button id="btn-export">导出 JSON</button>
-  <button id="btn-export-csv">导出 CSV</button>
-  <button id="btn-export-md">导出 Markdown</button>
-      <label class="import">
-        导入 JSON <input type="file" id="import-json" accept="application/json" />
-      </label>
-      <label class="import">
-        导入 CSV <input type="file" id="import-csv" accept="text/csv,.csv" />
-      </label>
+      <details class="fold">
+        <summary>导入 / 导出</summary>
+        <div class="fold-body">
+          <div class="io-row">
+            <button id="btn-export">导出 JSON</button>
+            <button id="btn-export-csv">导出 CSV</button>
+            <button id="btn-export-md">导出 Markdown</button>
+            <button id="btn-export-png">导出 PNG</button>
+          </div>
+          <div class="io-row">
+            <label class="import">导入 JSON <input type="file" id="import-json" accept="application/json" /></label>
+            <label class="import">导入 CSV <input type="file" id="import-csv" accept="text/csv,.csv" /></label>
+          </div>
+        </div>
+      </details>
     </div>
   </header>
   <main>

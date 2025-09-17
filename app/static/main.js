@@ -365,6 +365,38 @@ async function bootstrap() {
   const dupBtn = document.getElementById('btn-duplicate');
   if (dupBtn) dupBtn.onclick = async () => { await duplicateSelectedNode(); };
 
+  // 新建画布：可选择先保存（导出 JSON）再清空
+  const btnNewCanvas = document.getElementById('btn-new-canvas');
+  if (btnNewCanvas && !btnNewCanvas.dataset.bound) {
+    btnNewCanvas.dataset.bound = '1';
+    btnNewCanvas.onclick = async () => {
+      try {
+        const wantSave = confirm('是否在清空前保存当前画布为 JSON?\n选择“确定”将下载 JSON，随后清空；选择“取消”则直接清空。');
+        if (wantSave) {
+          const { data } = await axios.get('/api/export/json');
+          const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url; a.download = 'backup.json'; a.click();
+          URL.revokeObjectURL(url);
+        }
+        if (!confirm('此操作将清空当前画布的所有节点与手动关联，且无法撤销。是否继续？')) return;
+        await axios.post('/api/reset');
+        // 清理前端状态
+        selectedNode = null;
+        focusNodeId = null;
+        lastTapNodeId = null;
+        lastTapTime = 0;
+        edgeCpd.clear();
+        const editor = document.getElementById('node-editor');
+        if (editor) editor.innerHTML = '<div class="hint">选择图中的一个节点以编辑字段。</div>';
+        await refresh();
+      } catch (e) {
+        alert('新建画布失败');
+      }
+    };
+  }
+
   // 绑定边文本显示开关
   const toggle = document.getElementById('toggle-edge-labels');
   if (toggle && !toggle.dataset.bound) {
@@ -631,6 +663,31 @@ async function bootstrap() {
     a.href = url; a.download = 'export.md'; a.click();
     URL.revokeObjectURL(url);
   };
+
+  // 导出 PNG（当前可见图层）；优先 Blob，失败则使用 dataURL
+  const btnPng = document.getElementById('btn-export-png');
+  if (btnPng && !btnPng.dataset.bound) {
+    btnPng.dataset.bound = '1';
+    btnPng.onclick = async () => {
+      if (!cy) return;
+      try {
+        // scale: 放大导出清晰度；full: 使用内容大小；bg: 白底
+        const blob = await cy.png({ output: 'blob', full: true, scale: 2, bg: '#ffffff' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'graph.png'; a.click();
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        try {
+          const data = cy.png({ output: 'base64uri', full: true, scale: 2, bg: '#ffffff' });
+          const a = document.createElement('a');
+          a.href = data; a.download = 'graph.png'; a.click();
+        } catch (e2) {
+          alert('导出 PNG 失败');
+        }
+      }
+    };
+  }
 
   document.getElementById('import-json').onchange = async (ev) => {
     const file = ev.target.files?.[0];
