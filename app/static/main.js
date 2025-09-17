@@ -70,8 +70,8 @@ function renderGraph(nodes, edges) {
     layout: { name: 'preset' },
   boxSelectionEnabled: false,
   wheelSensitivity: 0.15,
-  minZoom: 0.2,
-  maxZoom: 3,
+  minZoom: 0.02,
+  maxZoom: 4,
   style: [
       { selector: 'node', style: { 'background-color': '#9CA3AF' } },
   { selector: 'edge', style: { 'curve-style': 'unbundled-bezier', 'edge-distances': 'node-position', 'line-color': '#CBD5E1', 'width': 2, 'label': 'data(label)', 'font-size': 10, 'text-background-opacity': 1, 'text-background-color': '#fff', 'text-background-padding': 2, 'target-arrow-shape': 'triangle', 'target-arrow-color': '#CBD5E1', 'control-point-distance': 'data(cpd)', 'control-point-weight': 0.5, 'text-rotation': 'autorotate' } },
