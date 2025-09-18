@@ -1,7 +1,7 @@
 # 备团助手（TRPG 模组整理软件）
 
 一个轻量的本地 Web 应用，用于以“节点 + 字段”的方式整理 TRPG 模组信息，并以图谱形式查看与编辑关联关系。
-
+![example.png](https://s2.loli.net/2025/09/18/oF7USeic5sWVnly.png)
 ## 功能概览
 
 - 节点/字段：创建节点，添加文本/标签/引用/数值字段，编辑/删除字段。
@@ -117,4 +117,5 @@ http://127.0.0.1:5000/
 - 后端：Flask，见 `app/main.py`。
 - 数据存储：JSON 文件，见 `app/storage.py`。
 - 前端：原生 HTML/JS + Cytoscape.js，见 `app/static/`。
+
 
