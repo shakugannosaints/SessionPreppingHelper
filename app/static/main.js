@@ -12,7 +12,9 @@ const DOUBLE_TAP_MS = 350;
 
 function mapNode(n) {
   const colors = n.style?.colors || ["#9CA3AF"]; 
-  const size = n.style?.size || 40;
+  const baseSize = n.style?.size || 40;
+  const scale = getSizeScale(n.fields);
+  const size = baseSize * scale;
   const gradient = colors.length > 1 ? `linear-gradient(${colors.join(',')})` : colors[0];
   const labelField = (n.fields || []).find(f => f.key === '名称') || (n.fields || []).find(f => f.type === 'text');
   const label = labelField ? String(labelField.value || '') : (n.id || '');
@@ -26,7 +28,7 @@ function mapNode(n) {
       'label': label,
       'text-valign': 'center',
       'text-halign': 'center',
-      'font-size': 12,
+      'font-size': Math.max(6, 12 * scale),
       'color': '#111',
       'text-outline-color': '#fff',
       'text-outline-width': 2,
@@ -34,6 +36,15 @@ function mapNode(n) {
       'border-color': '#fff',
     }
   };
+}
+
+function getSizeScale(fields) {
+  const arr = fields || [];
+  const f = arr.find(x => String(x.key || '') === '大小倍率');
+  if (!f) return 1;
+  const v = parseFloat(String(f.value ?? '1'));
+  if (!isFinite(v) || isNaN(v)) return 1;
+  return Math.max(0.5, v);
 }
 
 function mapLink(l) {
@@ -229,9 +240,14 @@ async function refresh() {
 
 function editorHtml(node) {
   const fields = node.fields || [];
+  const scaleVal = getSizeScale(fields);
   return `
     <div>
   <div class="muted" style="margin-bottom:6px;">ID: ${(node.id ?? '').toString().replace(/</g,'&lt;')}</div>
+      <div class="field-row">
+        <label style="min-width:72px;display:inline-block;">大小倍率</label>
+        <input id="size-scale" type="number" step="0.1" min="0.5" value="${scaleVal}" style="width:92px;" />
+      </div>
       ${fields.map((f, i) => `
         <div class="field-row">
           <input data-k ${attr('value', f.key)} placeholder="字段名">
@@ -270,22 +286,38 @@ function updateEditor(id) {
   el.querySelector('#add-field').onclick = () => {
     // 读取当前输入，避免内容丢失
     const rows = [...el.querySelectorAll('.field-row')];
-    node.fields = rows.map(r => ({
+    node.fields = rows.filter(r => r.querySelector('[data-k]')).map(r => ({
       key: r.querySelector('[data-k]').value,
       type: r.querySelector('[data-t]').value,
       value: r.querySelector('[data-v]').value,
     }));
+    // 同步大小倍率到字段集中
+    const scaleInput = el.querySelector('#size-scale');
+    if (scaleInput) {
+      const sc = Math.max(0.5, parseFloat(scaleInput.value || '1') || 1);
+      const idx = node.fields.findIndex(f => String(f.key) === '大小倍率');
+      if (idx >= 0) node.fields[idx] = { key: '大小倍率', type: 'number', value: String(sc) };
+      else node.fields.unshift({ key: '大小倍率', type: 'number', value: String(sc) });
+    }
     node.fields.push({ key: '', type: 'text', value: '' });
     updateEditor(id);
   };
   el.querySelector('#save-fields').onclick = async () => {
     const rows = [...el.querySelectorAll('.field-row')];
-    const fields = rows.map(r => ({
+    const list = rows.filter(r => r.querySelector('[data-k]')).map(r => ({
       key: r.querySelector('[data-k]').value.trim(),
       type: r.querySelector('[data-t]').value,
       value: r.querySelector('[data-v]').value,
     })).filter(f => f.key);
-    await axios.put(`/api/nodes/${id}`, { fields });
+    // 读取并合并大小倍率
+    const scaleInput = el.querySelector('#size-scale');
+    if (scaleInput) {
+      const sc = Math.max(0.5, parseFloat(scaleInput.value || '1') || 1);
+      const idx = list.findIndex(f => String(f.key) === '大小倍率');
+      if (idx >= 0) list[idx] = { key: '大小倍率', type: 'number', value: String(sc) };
+      else list.unshift({ key: '大小倍率', type: 'number', value: String(sc) });
+    }
+    await axios.put(`/api/nodes/${id}`, { fields: list });
     await refresh();
     selectedNode = cy.getElementById(id);
     selectedNode ? selectedNode.select() : null;
@@ -308,11 +340,19 @@ function updateEditor(id) {
   el.querySelectorAll('[data-del]').forEach((btn, idx) => btn.onclick = () => {
     // 删除前先取当前所有值，避免丢失未保存的编辑内容
     const rows = [...el.querySelectorAll('.field-row')];
-    node.fields = rows.map(r => ({
+    node.fields = rows.filter(r => r.querySelector('[data-k]')).map(r => ({
       key: r.querySelector('[data-k]').value,
       type: r.querySelector('[data-t]').value,
       value: r.querySelector('[data-v]').value,
     }));
+    // 同步大小倍率
+    const scaleInput = el.querySelector('#size-scale');
+    if (scaleInput) {
+      const sc = Math.max(0.5, parseFloat(scaleInput.value || '1') || 1);
+      const idxx = node.fields.findIndex(f => String(f.key) === '大小倍率');
+      if (idxx >= 0) node.fields[idxx] = { key: '大小倍率', type: 'number', value: String(sc) };
+      else node.fields.unshift({ key: '大小倍率', type: 'number', value: String(sc) });
+    }
     node.fields.splice(idx, 1);
     updateEditor(id);
   });
