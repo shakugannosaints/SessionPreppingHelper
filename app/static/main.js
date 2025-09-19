@@ -57,9 +57,8 @@ function mapLink(l) {
 }
 
 async function loadData() {
-  const field = document.getElementById('rel-filter').value;
-  const url = field ? `/api/data?field=${encodeURIComponent(field)}` : '/api/data';
-  const { data } = await axios.get(url);
+  // 总是获取完整数据，自动连线筛选在前端完成
+  const { data } = await axios.get('/api/data');
   const nodes = (data.nodes || []).map(mapNode);
   const edges = [...(data.links || []), ...(data.autoLinks || [])].map(mapLink);
   return { nodes, edges, rawNodes: data.nodes };
@@ -235,6 +234,7 @@ async function refresh() {
   await renderSuppressed();
   await updateHistoryButtons();
   // 渲染后根据当前选择应用聚焦态
+  applyAutoEdgeFilter();
   updateFocusBySelection();
 }
 
@@ -498,7 +498,17 @@ async function bootstrap() {
     return out;
   }
 
-  document.getElementById('rel-filter').onchange = refresh;
+  // 绑定自动关联筛选控件
+  const presetSel = document.getElementById('auto-filter-preset');
+  if (presetSel && !presetSel.dataset.bound) {
+    presetSel.dataset.bound = '1';
+    presetSel.addEventListener('change', () => { applyAutoEdgeFilter(); updateFocusBySelection(); });
+  }
+  const exprInput = document.getElementById('auto-filter');
+  if (exprInput && !exprInput.dataset.bound) {
+    exprInput.dataset.bound = '1';
+    exprInput.addEventListener('input', () => { applyAutoEdgeFilter(); updateFocusBySelection(); });
+  }
   // 聚焦层数输入变更
   const depthInput = document.getElementById('focus-depth');
   if (depthInput && !depthInput.dataset.bound) {
@@ -826,6 +836,43 @@ function updateFocusBySelection() {
     // 应用淡化：仅保留 keepNodes 与 keepEdges
     cy.nodes().forEach(n => { if (!keepNodes.has(n.id())) n.addClass('faded'); });
     cy.edges().forEach(e => { if (!keepEdges.has(e.id())) e.addClass('faded'); });
+  });
+}
+
+function applyAutoEdgeFilter() {
+  if (!cy) return;
+  const preset = document.getElementById('auto-filter-preset');
+  const exprEl = document.getElementById('auto-filter');
+  const presetVal = preset ? (preset.value || 'all') : 'all';
+  let expr = (exprEl && exprEl.value) ? String(exprEl.value).trim() : '';
+  // 解析表达式：支持 OR/或/|| 联合；AND/与/&& 简化为联合（对单条边无意义）
+  expr = expr
+    .replaceAll('||', ' OR ')
+    .replaceAll('或', ' OR ')
+    .replaceAll('与', ' OR ')
+    .replaceAll('&&', ' OR ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const tokens = expr ? expr.split(/\sOR\s/i).map(s => s.trim()).filter(Boolean) : [];
+
+  cy.batch(() => {
+    cy.edges().forEach(e => {
+      if (!e.hasClass('auto')) return; // 只处理自动连线
+      let visible = true;
+      if (presetVal === 'none') {
+        visible = false;
+      } else if (tokens.length > 0) {
+        // 从边的 label 或边上派生的标签里匹配关键字
+        const label = String(e.data('label') || '');
+        // 边的标签来源：我们使用 Rule B，通常 label 是 "B" 或字段名；这里仅作关键词包含判断
+        const hay = label;
+        visible = tokens.some(t => hay.includes(t));
+      } else {
+        // all
+        visible = true;
+      }
+      e.style('display', visible ? 'element' : 'none');
+    });
   });
 }
 

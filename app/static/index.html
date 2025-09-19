@@ -27,11 +27,23 @@
         聚焦层数
         <input id="focus-depth" type="number" min="1" value="1" style="width:64px;" />
       </label>
-      <select id="rel-filter">
-        <option value="">自动关联：全部字段</option>
-        <option value="地点">只看地点</option>
-        <option value="标签">只看标签</option>
-      </select>
+      <details class="fold">
+        <summary>自动关联筛选</summary>
+        <div class="fold-body">
+          <div class="io-row">
+            <label style="margin-right:6px;">预设</label>
+            <select id="auto-filter-preset">
+              <option value="all">全看</option>
+              <option value="none">全不看</option>
+            </select>
+          </div>
+          <div class="io-row">
+            <label style="margin-right:6px;">标签表达式</label>
+            <input id="auto-filter" placeholder="例如：地点 OR 标签（留空=全看）" style="min-width:240px;" />
+          </div>
+          <div class="muted" style="margin-top:4px;">用 OR/或/|| 表示并集；多个空格分隔也视为并集。AND/与 对单条连线无意义，将按并集处理。</div>
+        </div>
+      </details>
   <button id="btn-undo" title="撤销 (Ctrl+Z)">撤销</button>
   <button id="btn-redo" title="重做 (Ctrl+Y)">重做</button>
       <details class="fold">
