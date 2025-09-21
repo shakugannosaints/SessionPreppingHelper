@@ -14,53 +14,64 @@
   <header>
     <h1>备团助手</h1>
     <div class="actions">
-            <button id="btn-layout">自动布局</button>
-      <button id="btn-new-canvas" title="新建画布/清空当前">新建画布</button>
-      <button id="btn-new-node">新建节点</button>
-      <select id="template-select"></select>
-      <button id="btn-apply-template">用模板创建</button>
-      <input id="search" placeholder="搜索关键字" />
-  <span class="muted">（可用 关键词 或 键:值）</span>
-  <button id="btn-duplicate" title="复制选中节点 (Ctrl+Shift+K)">复制节点</button>
-  <label class="toggle"><input type="checkbox" id="toggle-edge-labels"> 显示连线文本</label>
-      <label class="toggle" title="双击节点进入聚焦，空白处退出">
-        聚焦层数
-        <input id="focus-depth" type="number" min="1" value="1" style="width:64px;" />
-      </label>
-      <details class="fold">
-        <summary>自动关联筛选</summary>
-        <div class="fold-body">
-          <div class="io-row">
-            <label style="margin-right:6px;">预设</label>
-            <select id="auto-filter-preset">
-              <option value="all">全看</option>
-              <option value="none">全不看</option>
-            </select>
-          </div>
-          <div class="io-row">
-            <label style="margin-right:6px;">标签表达式</label>
-            <input id="auto-filter" placeholder="例如：地点 OR 标签（留空=全看）" style="min-width:240px;" />
-          </div>
-          <div class="muted" style="margin-top:4px;">用 OR/或/|| 表示并集；多个空格分隔也视为并集。AND/与 对单条连线无意义，将按并集处理。</div>
-        </div>
-      </details>
-  <button id="btn-undo" title="撤销 (Ctrl+Z)">撤销</button>
-  <button id="btn-redo" title="重做 (Ctrl+Y)">重做</button>
-      <details class="fold">
-        <summary>导入 / 导出</summary>
-        <div class="fold-body">
-          <div class="io-row">
-            <button id="btn-export">导出 JSON</button>
-            <button id="btn-export-csv">导出 CSV</button>
-            <button id="btn-export-md">导出 Markdown</button>
-            <button id="btn-export-png">导出 PNG</button>
-          </div>
-          <div class="io-row">
-            <label class="import">导入 JSON <input type="file" id="import-json" accept="application/json" /></label>
-            <label class="import">导入 CSV <input type="file" id="import-csv" accept="text/csv,.csv" /></label>
+      <div class="left">
+        <button id="btn-new-canvas" title="新建画布/清空当前">新建画布</button>
+        <button id="btn-new-node">新建节点</button>
+        <label class="toggle" title="新建节点时，若有选中则自动指向对方">
+          <input type="checkbox" id="auto-link-on-create" /> 新建自动指向选中
+        </label>
+        <select id="template-select"></select>
+        <button id="btn-apply-template">用模板创建</button>
+        <button id="btn-duplicate" title="复制选中节点 (Ctrl+Shift+K)">复制节点</button>
+      </div>
+      <div class="center">
+        <input id="search" placeholder="搜索关键字" />
+        <span class="muted">（可用 关键词 或 键:值）</span>
+      </div>
+      <div class="right">
+        <button id="btn-layout">自动布局</button>
+        <label class="toggle"><input type="checkbox" id="toggle-edge-labels"> 显示连线文本</label>
+        <label class="toggle" title="双击节点进入聚焦，空白处退出">
+          聚焦层数
+          <input id="focus-depth" type="number" min="1" value="1" style="width:64px;" />
+        </label>
+        <button id="btn-undo" title="撤销 (Ctrl+Z)">撤销</button>
+        <button id="btn-redo" title="重做 (Ctrl+Y)">重做</button>
+
+        <div class="dropdown" id="dd-auto">
+          <button class="menu-trigger">自动关联筛选 ▾</button>
+          <div class="menu">
+            <div class="io-row">
+              <label style="margin-right:6px;">预设</label>
+              <select id="auto-filter-preset">
+                <option value="all">全看</option>
+                <option value="none">全不看</option>
+              </select>
+            </div>
+            <div class="io-row">
+              <label style="margin-right:6px;">标签表达式</label>
+              <input id="auto-filter" placeholder="例如：地点 OR 标签（留空=全看）" style="min-width:240px;" />
+            </div>
+            <div class="muted" style="margin-top:4px; padding-bottom:6px;">用 OR/或/|| 表示并集；多个空格分隔也视为并集。AND/与 对单条连线无意义，将按并集处理。</div>
           </div>
         </div>
-      </details>
+
+        <div class="dropdown" id="dd-io">
+          <button class="menu-trigger">导入 / 导出 ▾</button>
+          <div class="menu">
+            <div class="io-row">
+              <button id="btn-export">导出 JSON</button>
+              <button id="btn-export-csv">导出 CSV</button>
+              <button id="btn-export-md">导出 Markdown</button>
+              <button id="btn-export-png">导出 PNG</button>
+            </div>
+            <div class="io-row">
+              <label class="import">导入 JSON <input type="file" id="import-json" accept="application/json" /></label>
+              <label class="import">导入 CSV <input type="file" id="import-csv" accept="text/csv,.csv" /></label>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </header>
   <main>

@@ -1,8 +1,11 @@
 * { box-sizing: border-box; }
 body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'PingFang SC', 'Microsoft Yahei', sans-serif; }
-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid #eee; }
-header h1 { font-size: 18px; margin: 0; }
-.actions { display: flex; gap: 8px; align-items: center; }
+header { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid #eee; background: #fafafa; position: sticky; top: 0; z-index: 10; }
+header h1 { font-size: 18px; margin: 0 12px 0 0; white-space: nowrap; }
+.actions { display: grid; grid-template-columns: 1fr auto 1fr; gap: 8px; align-items: center; width: 100%; }
+.actions .left, .actions .center, .actions .right { display: flex; gap: 8px; align-items: center; }
+.actions .center { justify-content: center; }
+.actions .right { justify-content: flex-end; }
 main { display: grid; grid-template-columns: 320px 6px 1fr; height: calc(100vh - 54px); }
 aside { padding: 12px; border-right: 1px solid #eee; overflow: auto; }
 #resizer.resizer { cursor: col-resize; background: #f3f4f6; border-right: 1px solid #e5e7eb; }
@@ -17,3 +20,11 @@ input, select { padding: 6px; }
 .import input[type=file] { display: none; }
 .faded { opacity: 0.15; }
 textarea[data-v] { width: 100%; min-height: 96px; padding: 6px; line-height: 1.4; resize: vertical; font-family: inherit; font-size: 14px; }
+
+/* Dropdown menus */
+.dropdown { position: relative; }
+.dropdown .menu-trigger { background: #fff; border: 1px solid #e5e7eb; border-radius: 6px; }
+.dropdown .menu { position: absolute; right: 0; top: calc(100% + 6px); min-width: 320px; background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.08); padding: 8px; display: none; }
+.dropdown.open .menu { display: block; }
+.io-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+.fold-body { padding: 6px 0; }

@@ -379,9 +379,26 @@ async function bootstrap() {
   await refresh();
 
   document.getElementById('btn-new-node').onclick = async () => {
-  const center = getViewportCenter();
-  const payload = center ? { fields: [], position: center } : { fields: [] };
-  const { data } = await axios.post('/api/nodes', payload);
+    const center = getViewportCenter();
+    let fields = [];
+    // 若开启“新建自动指向选中”，并且当前有选中节点，则注入一个字段
+    const toggle = document.getElementById('auto-link-on-create');
+    const enabled = !!(toggle && toggle.checked);
+    const sel = cy ? cy.nodes(':selected') : null;
+    if (enabled && sel && sel.length > 0) {
+      const target = sel[0];
+      const raw = getNodeById(target.id());
+      if (raw) {
+        // 取目标节点的第一个 tag 值作为键，名称/文本作为值
+        const tagField = (raw.fields || []).find(f => f.type === 'tag' && f.value);
+        const nameField = (raw.fields || []).find(f => f.key === '名称') || (raw.fields || []).find(f => f.type === 'text');
+        const key = tagField ? String(tagField.value) : '标签';
+        const val = nameField ? String(nameField.value || '') : (raw.id || '');
+        fields.push({ key, type: 'text', value: val });
+      }
+    }
+    const payload = center ? { fields, position: center } : { fields };
+    const { data } = await axios.post('/api/nodes', payload);
     await refresh();
     selectedNode = cy.getElementById(data.id);
     selectedNode.select();
@@ -389,12 +406,27 @@ async function bootstrap() {
   };
 
   document.getElementById('btn-apply-template').onclick = async () => {
-    const sel = document.getElementById('template-select');
-    const name = sel.value;
+    const tplSel = document.getElementById('template-select');
+    const name = tplSel.value;
     if (!name) return;
-    const tpls = JSON.parse(sel.dataset.templates || '{}');
-    const fields = (tpls[name] || []).map(f => ({ ...f }));
+  const tpls = JSON.parse(tplSel.dataset.templates || '{}');
+  let fields = (tpls[name] || []).map(f => ({ ...f }));
   const center = getViewportCenter();
+  // 同步“新建自动指向选中”逻辑
+  const toggle = document.getElementById('auto-link-on-create');
+  const enabled = !!(toggle && toggle.checked);
+  const selNodes = cy ? cy.nodes(':selected') : null;
+  if (enabled && selNodes && selNodes.length > 0) {
+    const target = selNodes[0];
+    const raw = getNodeById(target.id());
+    if (raw) {
+      const tagField = (raw.fields || []).find(f => f.type === 'tag' && f.value);
+      const nameField = (raw.fields || []).find(f => f.key === '名称') || (raw.fields || []).find(f => f.type === 'text');
+      const key = tagField ? String(tagField.value) : '标签';
+      const val = nameField ? String(nameField.value || '') : (raw.id || '');
+      fields = [{ key, type: 'text', value: val }, ...fields];
+    }
+  }
   const payload = center ? { fields, position: center } : { fields };
   const { data } = await axios.post('/api/nodes', payload);
     await refresh();
@@ -474,6 +506,38 @@ async function bootstrap() {
         e.data('cpd', v);
         edgeCpd.set(e.id(), v); // keep for session refreshes
       });
+    });
+  }
+
+  // 顶部下拉菜单交互
+  function bindDropdown(id) {
+    const root = document.getElementById(id);
+    if (!root) return;
+    const trigger = root.querySelector('.menu-trigger');
+    const open = () => { root.classList.add('open'); };
+    const close = (e) => {
+      if (!root.contains(e.target)) root.classList.remove('open');
+    };
+    if (trigger && !trigger.dataset.bound) {
+      trigger.dataset.bound = '1';
+      trigger.addEventListener('click', (e) => {
+        e.stopPropagation();
+        root.classList.toggle('open');
+      });
+      document.addEventListener('click', close);
+    }
+  }
+  bindDropdown('dd-auto');
+  bindDropdown('dd-io');
+
+  // 记忆“新建自动指向选中”开关（localStorage）
+  const autoOnCreate = document.getElementById('auto-link-on-create');
+  if (autoOnCreate && !autoOnCreate.dataset.bound) {
+    autoOnCreate.dataset.bound = '1';
+    const k = 'autoLinkOnCreate';
+    try { autoOnCreate.checked = localStorage.getItem(k) === '1'; } catch {}
+    autoOnCreate.addEventListener('change', () => {
+      try { localStorage.setItem(k, autoOnCreate.checked ? '1' : '0'); } catch {}
     });
   }
 
