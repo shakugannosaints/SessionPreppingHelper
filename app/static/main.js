@@ -7,6 +7,9 @@ const edgeCpd = new Map();
 // cached groups for fast overlay rendering
 let cachedGroups = [];
 let rafGroups = null;
+// debounced saver for node positions after drag
+let dragSaveTimer = null;
+let dragSaveIds = new Set();
 // 聚焦模式状态：仅当双击同一节点后才进入
 let focusNodeId = null;
 let lastTapNodeId = null;
@@ -175,11 +178,25 @@ function renderGraph(nodes, edges) {
     }
   });
 
-  // 仅在用户完成拖拽后保存一次，避免高频 PUT
-  cy.on('dragfree', 'node', async (evt) => {
-    const id = evt.target.id();
-    const pos = evt.target.position();
-    try { await axios.put(`/api/nodes/${id}`, { position: pos }); } catch {}
+  // 仅在用户完成拖拽后保存一次（含多选），并去抖，避免高频 PUT
+  cy.on('dragfree', 'node', (evt) => {
+    const union = cy.nodes(':selected').union(evt.target);
+    union.forEach(n => { try { dragSaveIds.add(n.id()); } catch {} });
+    if (dragSaveTimer) clearTimeout(dragSaveTimer);
+    dragSaveTimer = setTimeout(async () => {
+      const ids = Array.from(dragSaveIds);
+      dragSaveIds.clear();
+      dragSaveTimer = null;
+      // 批量提交：合并为一次请求，便于撤销成为单个步骤
+      try {
+        const payload = ids.map(id => {
+          const n = cy.getElementById(id);
+          const pos = n ? n.position() : null;
+          return pos ? { id, position: { x: pos.x, y: pos.y } } : null;
+        }).filter(Boolean);
+        if (payload.length) await axios.post('/api/nodes/positions', payload);
+      } catch {}
+    }, 50);
   });
 
   // 在每次渲染后绑定：点击手动连线删除
@@ -273,8 +290,18 @@ function renderGraph(nodes, edges) {
   });
 }
 
-async function refresh() {
+async function refresh(preservePositions = true) {
   const { nodes, edges, rawNodes } = await loadData();
+  // 可选：保持当前已存在节点的位置，避免因服务端未及时保存导致位置回弹
+  if (preservePositions) {
+    try {
+      if (cy) {
+        const posMap = new Map();
+        cy.nodes().forEach(n => { const p = n.position(); posMap.set(n.id(), { x: p.x, y: p.y }); });
+        nodes.forEach(nd => { const p = posMap.get(nd.data.id); if (p) nd.position = p; });
+      }
+    } catch {}
+  }
   renderGraph(nodes, edges);
   window.__rawNodes = rawNodes;
   await renderSuppressed();
@@ -867,10 +894,10 @@ async function bootstrap() {
 
   // 撤销/重做按钮
   document.getElementById('btn-undo').onclick = async () => {
-    try { await axios.post('/api/undo'); } finally { await refresh(); }
+    try { await axios.post('/api/undo'); } finally { await refresh(false); }
   };
   document.getElementById('btn-redo').onclick = async () => {
-    try { await axios.post('/api/redo'); } finally { await refresh(); }
+    try { await axios.post('/api/redo'); } finally { await refresh(false); }
   };
 
   // 快捷键：Ctrl+Z / Ctrl+Y 及其他
@@ -880,8 +907,8 @@ async function bootstrap() {
     // 避免在输入框中触发
     const tag = (ev.target && ev.target.tagName) ? ev.target.tagName.toLowerCase() : '';
     if (tag === 'input' || tag === 'textarea' || ev.target?.isContentEditable) return;
-    if (ev.key.toLowerCase() === 'z') { ev.preventDefault(); await axios.post('/api/undo'); await refresh(); }
-    else if (ev.key.toLowerCase() === 'y') { ev.preventDefault(); await axios.post('/api/redo'); await refresh(); }
+  if (ev.key.toLowerCase() === 'z') { ev.preventDefault(); await axios.post('/api/undo'); await refresh(false); }
+  else if (ev.key.toLowerCase() === 'y') { ev.preventDefault(); await axios.post('/api/redo'); await refresh(false); }
     // 复制节点：Ctrl+Shift+K（避免与浏览器快捷键冲突）
     else if (ev.shiftKey && ev.key.toLowerCase() === 'k') { ev.preventDefault(); await duplicateSelectedNode(); }
   });
