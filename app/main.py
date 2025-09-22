@@ -112,6 +112,35 @@ def create_app() -> Flask:
                 return jsonify(n)
         return jsonify({"error": "not found"}), 404
 
+    @app.post("/api/nodes/positions")
+    def update_positions_batch():
+        body = request.get_json(force=True, silent=True) or {}
+        # Accept either a list of {id, position} or a dict id->position
+        items: List[Dict[str, Any]] = []
+        if isinstance(body, list):
+            items = [x for x in body if isinstance(x, dict) and isinstance(x.get("id"), str) and isinstance(x.get("position"), dict)]
+        elif isinstance(body, dict):
+            # when dict, consider { id: {x:.., y:..}, ... }
+            for k, v in body.items():
+                if isinstance(k, str) and isinstance(v, dict):
+                    items.append({"id": k, "position": v})
+        if not items:
+            return jsonify({"error": "invalid body"}), 400
+        data = read_all()
+        prev = deepcopy(data)
+        nodes: List[Dict[str, Any]] = data.get("nodes", [])
+        id_to_pos = {x["id"]: x["position"] for x in items}
+        updated = 0
+        for n in nodes:
+            nid = n.get("id")
+            if isinstance(nid, str) and nid in id_to_pos:
+                n["position"] = id_to_pos[nid]
+                updated += 1
+        if updated == 0:
+            return jsonify({"error": "no match"}), 400
+        write_with_undo(data, prev)
+        return jsonify({"ok": True, "updated": updated})
+
     @app.delete("/api/nodes/<node_id>")
     def delete_node(node_id: str):
         data = read_all()
