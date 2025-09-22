@@ -21,11 +21,27 @@ function mapNode(n) {
   const gradient = colors.length > 1 ? `linear-gradient(${colors.join(',')})` : colors[0];
   const labelField = (n.fields || []).find(f => f.key === '名称') || (n.fields || []).find(f => f.type === 'text');
   const label = labelField ? String(labelField.value || '') : (n.id || '');
+  const baseColor = colors[0] || '#9CA3AF';
+  const toHex2 = (v) => ('0' + v.toString(16)).slice(-2);
+  const invertHex = (hex) => {
+    try {
+      let h = String(hex).trim();
+      if (!h) return '#3b82f6';
+      if (h.startsWith('#')) h = h.slice(1);
+      if (h.length === 3) h = h.split('').map(c => c + c).join('');
+      if (h.length !== 6) return '#3b82f6';
+      const r = 255 - parseInt(h.slice(0,2), 16);
+      const g = 255 - parseInt(h.slice(2,4), 16);
+      const b = 255 - parseInt(h.slice(4,6), 16);
+      return `#${toHex2(r)}${toHex2(g)}${toHex2(b)}`;
+    } catch { return '#3b82f6'; }
+  };
+  const selColor = invertHex(baseColor);
   return {
-    data: { id: n.id, label },
+    data: { id: n.id, label, selColor },
     position: n.position || undefined,
     style: {
-      'background-color': colors[0],
+      'background-color': baseColor,
       'width': size,
       'height': size,
       'label': label,
@@ -85,7 +101,7 @@ function renderGraph(nodes, edges) {
   maxZoom: 4,
   style: [
   { selector: 'node', style: { 'background-color': '#9CA3AF', 'border-width': 2, 'border-color': '#fff' } },
-  { selector: 'node:selected', style: { 'border-color': '#3b82f6', 'border-width': 4, 'shadow-blur': 12, 'shadow-color': '#60a5fa', 'shadow-opacity': 0.8, 'shadow-offset-x': 0, 'shadow-offset-y': 0 } },
+  { selector: 'node:selected', style: { 'border-color': 'data(selColor)', 'border-width': 4, 'shadow-blur': 12, 'shadow-color': 'data(selColor)', 'shadow-opacity': 0.8, 'shadow-offset-x': 0, 'shadow-offset-y': 0 } },
   { selector: 'edge', style: { 'curve-style': 'unbundled-bezier', 'edge-distances': 'node-position', 'line-color': '#CBD5E1', 'width': 2, 'label': 'data(label)', 'font-size': 10, 'text-background-opacity': 1, 'text-background-color': '#fff', 'text-background-padding': 2, 'target-arrow-shape': 'triangle', 'target-arrow-color': '#CBD5E1', 'control-point-distance': 'data(cpd)', 'control-point-weight': 0.5, 'text-rotation': 'autorotate' } },
   // 聚焦模式：非邻域淡化
   { selector: 'node.faded', style: { 'opacity': 0.15, 'text-opacity': 0.2 } },
