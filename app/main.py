@@ -73,7 +73,12 @@ def create_app() -> Flask:
                 except Exception:
                     pass
         auto_links = filtered_auto
-        return jsonify({"nodes": nodes, "links": data.get("links", []), "autoLinks": auto_links})
+        return jsonify({
+            "nodes": nodes,
+            "links": data.get("links", []),
+            "autoLinks": auto_links,
+            "groups": data.get("groups", []),
+        })
 
     @app.post("/api/nodes")
     def create_node():
@@ -198,6 +203,7 @@ def create_app() -> Flask:
             "links": body.get("links", []),
             "suppressedAutoPairs": body.get("suppressedAutoPairs", []),
             "autoEdgeOverrides": body.get("autoEdgeOverrides", {}),
+            "groups": body.get("groups", []),
         }, prev)
         return jsonify({"ok": True})
 
@@ -351,6 +357,86 @@ def create_app() -> Flask:
             lines.append("")
         payload = "\n".join(lines).encode("utf-8")
         return (payload, 200, {"Content-Type": "text/markdown; charset=utf-8", "Content-Disposition": "attachment; filename=export.md"})
+
+    # reset canvas: clear nodes, links and auto-related settings
+    @app.post("/api/reset")
+    def api_reset():
+        data = read_all()
+        prev = deepcopy(data)
+        new_data: Dict[str, Any] = {
+            "nodes": [],
+            "links": [],
+            "suppressedAutoPairs": [],
+            "autoEdgeOverrides": {},
+            "groups": [],
+        }
+        write_with_undo(new_data, prev)
+        return jsonify({"ok": True})
+
+    # Groups CRUD
+    @app.get("/api/groups")
+    def list_groups():
+        data = read_all()
+        return jsonify(data.get("groups", []))
+
+    @app.post("/api/groups")
+    def create_group():
+        body = request.get_json(force=True, silent=True) or {}
+        label = body.get("label") or "编组"
+        members = body.get("members") or []
+        if not isinstance(members, list):
+            return jsonify({"error": "invalid members"}), 400
+        data = read_all()
+        prev = deepcopy(data)
+        gid = new_id()
+        color = body.get("color") or "#3b82f6"
+        opacity = body.get("opacity")
+        try:
+            op = float(opacity) if opacity is not None else 0.08
+        except Exception:
+            op = 0.08
+        group = {"id": gid, "label": str(label), "members": [m for m in members if isinstance(m, str)], "color": str(color), "opacity": op}
+        data.setdefault("groups", []).append(group)
+        write_with_undo(data, prev)
+        return jsonify(group)
+
+    @app.put("/api/groups/<gid>")
+    def update_group(gid: str):
+        body = request.get_json(force=True, silent=True) or {}
+        data = read_all()
+        prev = deepcopy(data)
+        groups: List[Dict[str, Any]] = data.setdefault("groups", [])
+        for g in groups:
+            if g.get("id") == gid:
+                if "label" in body:
+                    g["label"] = str(body.get("label") or "")
+                if "members" in body and isinstance(body.get("members"), list):
+                    mems = body.get("members") or []
+                    g["members"] = [m for m in mems if isinstance(m, str)]
+                if "color" in body:
+                    g["color"] = str(body.get("color") or "#3b82f6")
+                if "opacity" in body:
+                    val = body.get("opacity")
+                    try:
+                        if val is not None:
+                            g["opacity"] = float(val)
+                    except Exception:
+                        pass
+                write_with_undo(data, prev)
+                return jsonify(g)
+        return jsonify({"error": "not found"}), 404
+
+    @app.delete("/api/groups/<gid>")
+    def delete_group(gid: str):
+        data = read_all()
+        prev = deepcopy(data)
+        groups: List[Dict[str, Any]] = data.setdefault("groups", [])
+        before = len(groups)
+        groups[:] = [g for g in groups if g.get("id") != gid]
+        if len(groups) == before:
+            return jsonify({"error": "not found"}), 404
+        write_with_undo(data, prev)
+        return jsonify({"ok": True})
 
     return app
 
