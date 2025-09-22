@@ -4,6 +4,9 @@ let linkPick = [];
 let sidebarWidth = 320;
 // in-memory curvature overrides (for auto edges or session-only)
 const edgeCpd = new Map();
+// cached groups for fast overlay rendering
+let cachedGroups = [];
+let rafGroups = null;
 // 聚焦模式状态：仅当双击同一节点后才进入
 let focusNodeId = null;
 let lastTapNodeId = null;
@@ -32,8 +35,6 @@ function mapNode(n) {
       'color': '#111',
       'text-outline-color': '#fff',
       'text-outline-width': 2,
-      'border-width': 2,
-      'border-color': '#fff',
     }
   };
 }
@@ -78,12 +79,13 @@ function renderGraph(nodes, edges) {
     container: el,
     elements: { nodes, edges },
     layout: { name: 'preset' },
-  boxSelectionEnabled: false,
+  boxSelectionEnabled: true,
   wheelSensitivity: 0.15,
   minZoom: 0.02,
   maxZoom: 4,
   style: [
-      { selector: 'node', style: { 'background-color': '#9CA3AF' } },
+  { selector: 'node', style: { 'background-color': '#9CA3AF', 'border-width': 2, 'border-color': '#fff' } },
+  { selector: 'node:selected', style: { 'border-color': '#3b82f6', 'border-width': 4, 'shadow-blur': 12, 'shadow-color': '#60a5fa', 'shadow-opacity': 0.8, 'shadow-offset-x': 0, 'shadow-offset-y': 0 } },
   { selector: 'edge', style: { 'curve-style': 'unbundled-bezier', 'edge-distances': 'node-position', 'line-color': '#CBD5E1', 'width': 2, 'label': 'data(label)', 'font-size': 10, 'text-background-opacity': 1, 'text-background-color': '#fff', 'text-background-padding': 2, 'target-arrow-shape': 'triangle', 'target-arrow-color': '#CBD5E1', 'control-point-distance': 'data(cpd)', 'control-point-weight': 0.5, 'text-rotation': 'autorotate' } },
   // 聚焦模式：非邻域淡化
   { selector: 'node.faded', style: { 'opacity': 0.15, 'text-opacity': 0.2 } },
@@ -101,6 +103,25 @@ function renderGraph(nodes, edges) {
     try { cy.zoom(prev.zoom); cy.pan(prev.pan); } catch {}
   }
 
+    // 平移/缩放后，重绘编组框位置（用 rAF 合批，避免频繁重建）
+    cy.on('pan zoom', () => {
+      if (rafGroups) return;
+      rafGroups = requestAnimationFrame(() => { rafGroups = null; renderGroups(); });
+    });
+
+    // 选中样式：在选中/取消时切换 CSS 类（用于更强的高亮效果）
+    cy.on('select', 'node', (evt) => {
+      try {
+        const dom = document.querySelector(`[data-id="${evt.target.id()}"]`);
+        // 若未使用 data-id，可直接依赖 Cytoscape 样式；这里额外添加类供自定义
+      } catch {}
+    });
+    cy.on('unselect', 'node', (evt) => {
+      try {
+        const dom = document.querySelector(`[data-id="${evt.target.id()}"]`);
+      } catch {}
+    });
+
   // 应用边文本显示开关状态
   const labelToggle = document.getElementById('toggle-edge-labels');
   const showLabels = labelToggle ? !!labelToggle.checked : true;
@@ -108,6 +129,14 @@ function renderGraph(nodes, edges) {
 
   cy.on('tap', 'node', (evt) => {
     const n = evt.target;
+    const e = evt.originalEvent;
+    // 支持 Ctrl/Shift 多选
+    if (e && (e.ctrlKey || e.metaKey || e.shiftKey)) {
+      if (n.selected()) n.unselect(); else n.select();
+    } else {
+      cy.nodes().unselect();
+      n.select();
+    }
     selectedNode = n;
     updateEditor(n.id());
     // link picking
@@ -130,10 +159,11 @@ function renderGraph(nodes, edges) {
     }
   });
 
-  cy.on('position', 'node', async (evt) => {
+  // 仅在用户完成拖拽后保存一次，避免高频 PUT
+  cy.on('dragfree', 'node', async (evt) => {
     const id = evt.target.id();
     const pos = evt.target.position();
-    await axios.put(`/api/nodes/${id}`, { position: pos });
+    try { await axios.put(`/api/nodes/${id}`, { position: pos }); } catch {}
   });
 
   // 在每次渲染后绑定：点击手动连线删除
@@ -160,7 +190,7 @@ function renderGraph(nodes, edges) {
   // 点击空白处：取消选择并退出聚焦模式
   cy.on('tap', (evt) => {
     if (evt.target === cy) {
-      cy.elements().unselect();
+  cy.elements().unselect();
       selectedNode = null;
   focusNodeId = null; // 仅空白点击才退出聚焦
       const el = document.getElementById('node-editor');
@@ -236,6 +266,9 @@ async function refresh() {
   // 渲染后根据当前选择应用聚焦态
   applyAutoEdgeFilter();
   updateFocusBySelection();
+  // 同步编组缓存并渲染群组
+  await refreshGroupsCache();
+  renderGroups();
 }
 
 function editorHtml(node) {
@@ -372,6 +405,111 @@ async function initTemplates() {
   const sel = document.getElementById('template-select');
   sel.innerHTML = '<option value="">选择模板</option>' + Object.keys(data).map(k => `<option value="${k}">${k}</option>`).join('');
   sel.dataset.templates = JSON.stringify(data);
+}
+
+function renderGroups() {
+  const groups = Array.isArray(cachedGroups) ? cachedGroups : [];
+  const container = document.getElementById('graph');
+  if (!container || !cy) return;
+  // 清理旧 DOM
+  [...container.querySelectorAll('.group-box, .group-label')].forEach(x => x.remove());
+  const pan = cy.pan(); const zoom = cy.zoom() || 1;
+  const toScreen = (p) => ({ x: p.x * zoom + pan.x, y: p.y * zoom + pan.y });
+  const hexToRgba = (hex, alpha) => {
+    try {
+      if (!hex) return `rgba(59,130,246,${alpha ?? 0.08})`;
+      let h = hex.trim();
+      if (h.startsWith('#')) h = h.slice(1);
+      if (h.length === 3) h = h.split('').map(c => c + c).join('');
+      const r = parseInt(h.slice(0,2), 16);
+      const g = parseInt(h.slice(2,4), 16);
+      const b = parseInt(h.slice(4,6), 16);
+      const a = (typeof alpha === 'number' ? alpha : 0.08);
+      return `rgba(${r},${g},${b},${a})`;
+    } catch { return `rgba(59,130,246,${alpha ?? 0.08})`; }
+  };
+  const updateBox = (els, color, opacity, box, labelEl) => {
+    const pad = 30;
+    const bb = els.boundingBox();
+    const tl = toScreen({ x: bb.x1 - pad, y: bb.y1 - pad });
+    const br = toScreen({ x: bb.x2 + pad, y: bb.y2 + pad });
+    box.style.left = tl.x + 'px';
+    box.style.top = tl.y + 'px';
+    box.style.width = (br.x - tl.x) + 'px';
+    box.style.height = (br.y - tl.y) + 'px';
+    box.style.background = hexToRgba(color, opacity);
+    box.style.border = `1px dashed ${color}`;
+    if (labelEl) {
+      labelEl.style.left = (tl.x + 8) + 'px';
+      labelEl.style.top = (tl.y + 4) + 'px';
+    }
+  };
+  groups.forEach(g => {
+    const ids = (g.members || []).filter(Boolean);
+    const eles = cy.collection(ids.map(id => cy.getElementById(id))).filter('node');
+    if (!eles || eles.length === 0) return;
+    const color = g.color || '#3b82f6';
+    const opacity = (typeof g.opacity === 'number') ? g.opacity : 0.08;
+    const box = document.createElement('div');
+    box.className = 'group-box';
+    box.style.position = 'absolute';
+    box.style.borderRadius = '8px';
+    box.style.pointerEvents = 'none';
+    box.style.userSelect = 'none';
+    box.style.zIndex = 2;
+    container.appendChild(box);
+
+    const lbl = document.createElement('div');
+    lbl.className = 'group-label';
+    lbl.textContent = g.label || '编组';
+    lbl.style.position = 'absolute';
+    lbl.style.padding = '2px 6px';
+    lbl.style.background = '#fff';
+    lbl.style.border = '1px solid #e5e7eb';
+    lbl.style.borderRadius = '6px';
+    lbl.style.fontSize = '12px';
+    lbl.style.cursor = 'move';
+    lbl.style.zIndex = 3;
+    container.appendChild(lbl);
+
+    updateBox(eles, color, opacity, box, lbl);
+
+    // 拖动编组：移动所有成员节点，并实时更新可视框
+    lbl.addEventListener('mousedown', (ev) => {
+      ev.preventDefault(); ev.stopPropagation();
+      let start = { x: ev.clientX, y: ev.clientY };
+      const onMove = (mv) => {
+        const dx = (mv.clientX - start.x) / (cy.zoom() || 1);
+        const dy = (mv.clientY - start.y) / (cy.zoom() || 1);
+        start = { x: mv.clientX, y: mv.clientY };
+        eles.forEach(n => {
+          const p = n.position();
+          n.position({ x: p.x + dx, y: p.y + dy });
+        });
+        updateBox(eles, color, opacity, box, lbl);
+      };
+      const onUp = async () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        for (let i = 0; i < eles.length; i++) {
+          const n = eles[i];
+          const id = n.id();
+          const pos = n.position();
+          try { await axios.put(`/api/nodes/${id}`, { position: pos }); } catch {}
+        }
+        renderGroups();
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    });
+  });
+}
+
+async function refreshGroupsCache() {
+  try {
+    const { data } = await axios.get('/api/groups');
+    cachedGroups = Array.isArray(data) ? data : [];
+  } catch { cachedGroups = []; }
 }
 
 async function bootstrap() {
@@ -520,15 +658,79 @@ async function bootstrap() {
     };
     if (trigger && !trigger.dataset.bound) {
       trigger.dataset.bound = '1';
-      trigger.addEventListener('click', (e) => {
+      trigger.addEventListener('click', async (e) => {
         e.stopPropagation();
+        const opening = !root.classList.contains('open');
         root.classList.toggle('open');
+        // 当打开编组菜单时，拉取并填充编组列表
+        if (opening && id === 'dd-group') {
+          try {
+            const { data } = await axios.get('/api/groups');
+            cachedGroups = Array.isArray(data) ? data : [];
+            const menu = root.querySelector('.menu');
+            let list = menu.querySelector('.group-list');
+            if (!list) {
+              list = document.createElement('div');
+              list.className = 'group-list';
+              list.style.maxHeight = '220px';
+              list.style.overflow = 'auto';
+              list.style.marginTop = '6px';
+              list.style.borderTop = '1px solid #eee';
+              list.style.paddingTop = '6px';
+              menu.appendChild(list);
+            }
+            list.innerHTML = '';
+            if (!cachedGroups.length) {
+              list.textContent = '暂无编组';
+            } else {
+              cachedGroups.forEach(g => {
+                const row = document.createElement('div');
+                row.style.display = 'flex';
+                row.style.alignItems = 'center';
+                row.style.justifyContent = 'space-between';
+                row.style.gap = '6px';
+                row.style.padding = '4px 0';
+                const name = document.createElement('span');
+                name.textContent = `${g.label || '编组'} (${g.id})`;
+                name.style.flex = '1';
+                const editBtn = document.createElement('button');
+                editBtn.textContent = '设为当前编辑';
+                editBtn.onclick = async () => {
+                  // 使用当前选中作为新成员集并更新名称/样式输入框值
+                  const sel = cy ? cy.nodes(':selected') : null;
+                  const ids = sel ? sel.map(n => n.id()) : (g.members || []);
+                  const newLabel = prompt('编组名称：', g.label || '编组') || g.label || '编组';
+                  const color = (document.getElementById('group-color')?.value) || g.color || '#3b82f6';
+                  const opacityVal = parseFloat(document.getElementById('group-opacity')?.value || String(g.opacity ?? '0.08')) || (g.opacity ?? 0.08);
+                  await axios.put(`/api/groups/${g.id}`, { label: newLabel, members: ids, color, opacity: opacityVal });
+                  await refreshGroupsCache();
+                  renderGroups();
+                };
+                const delBtn = document.createElement('button');
+                delBtn.textContent = '删除';
+                delBtn.onclick = async () => {
+                  if (!confirm(`确认删除编组：${g.label || g.id}？`)) return;
+                  await axios.delete(`/api/groups/${g.id}`);
+                  await refreshGroupsCache();
+                  renderGroups();
+                  // 重新填充列表
+                  trigger.click(); trigger.click();
+                };
+                row.appendChild(name);
+                row.appendChild(editBtn);
+                row.appendChild(delBtn);
+                list.appendChild(row);
+              });
+            }
+          } catch {}
+        }
       });
       document.addEventListener('click', close);
     }
   }
   bindDropdown('dd-auto');
   bindDropdown('dd-io');
+  bindDropdown('dd-group');
 
   // 记忆“新建自动指向选中”开关（localStorage）
   const autoOnCreate = document.getElementById('auto-link-on-create');
@@ -539,6 +741,68 @@ async function bootstrap() {
     autoOnCreate.addEventListener('change', () => {
       try { localStorage.setItem(k, autoOnCreate.checked ? '1' : '0'); } catch {}
     });
+  }
+
+  // 编组工具栏操作
+  const btnGroupCreate = document.getElementById('btn-group-create');
+  if (btnGroupCreate && !btnGroupCreate.dataset.bound) {
+    btnGroupCreate.dataset.bound = '1';
+    btnGroupCreate.onclick = async () => {
+      const sel = cy ? cy.nodes(':selected') : null;
+      const ids = sel ? sel.map(n => n.id()) : [];
+      if (!ids.length) { alert('请先选择至少一个节点'); return; }
+      const label = prompt('编组名称：', '编组') || '编组';
+      const color = (document.getElementById('group-color')?.value) || '#3b82f6';
+      const opacityVal = parseFloat(document.getElementById('group-opacity')?.value || '0.08') || 0.08;
+      try {
+        await axios.post('/api/groups', { label, members: ids, color, opacity: opacityVal });
+        await refreshGroupsCache();
+        renderGroups();
+      } catch { alert('创建失败'); }
+    };
+  }
+
+  const btnGroupEdit = document.getElementById('btn-group-edit');
+  if (btnGroupEdit && !btnGroupEdit.dataset.bound) {
+    btnGroupEdit.dataset.bound = '1';
+    btnGroupEdit.onclick = async () => {
+      try {
+        const { data } = await axios.get('/api/groups');
+        const groups = Array.isArray(data) ? data : [];
+        if (!groups.length) { alert('暂无编组'); return; }
+        const gid = prompt('输入要编辑的编组ID：\n' + groups.map(g => `${g.id}: ${g.label}`).join('\n'));
+        if (!gid) return;
+        const g = groups.find(x => x.id === gid);
+        if (!g) { alert('未找到该编组'); return; }
+        // 使用当前选中作为新成员集
+        const sel = cy ? cy.nodes(':selected') : null;
+        const ids = sel ? sel.map(n => n.id()) : (g.members || []);
+        const label = prompt('编组名称：', g.label || '编组') || g.label || '编组';
+        const color = (document.getElementById('group-color')?.value) || g.color || '#3b82f6';
+        const opacityVal = parseFloat(document.getElementById('group-opacity')?.value || String(g.opacity ?? '0.08')) || (g.opacity ?? 0.08);
+  await axios.put(`/api/groups/${gid}`, { label, members: ids, color, opacity: opacityVal });
+  await refreshGroupsCache();
+  renderGroups();
+      } catch { alert('编辑失败'); }
+    };
+  }
+
+  const btnGroupDelete = document.getElementById('btn-group-delete');
+  if (btnGroupDelete && !btnGroupDelete.dataset.bound) {
+    btnGroupDelete.dataset.bound = '1';
+    btnGroupDelete.onclick = async () => {
+      try {
+        const { data } = await axios.get('/api/groups');
+        const groups = Array.isArray(data) ? data : [];
+        if (!groups.length) { alert('暂无编组'); return; }
+        const gid = prompt('输入要删除的编组ID：\n' + groups.map(g => `${g.id}: ${g.label}`).join('\n'));
+        if (!gid) return;
+        if (!confirm('确认删除该编组？')) return;
+  await axios.delete(`/api/groups/${gid}`);
+  await refreshGroupsCache();
+  renderGroups();
+      } catch { alert('删除失败'); }
+    };
   }
 
   function fanOffsets(n, base) {

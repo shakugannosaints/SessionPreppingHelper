@@ -56,6 +56,23 @@
           </div>
         </div>
 
+        <div class="dropdown" id="dd-group">
+          <button class="menu-trigger">编组 ▾</button>
+          <div class="menu">
+            <div class="io-row">
+              <button id="btn-group-create">新建编组(以当前选中)</button>
+              <button id="btn-group-edit">编辑编组成员</button>
+              <button id="btn-group-delete">删除编组</button>
+            </div>
+            <div class="io-row">
+              <label>颜色</label>
+              <input id="group-color" type="color" value="#3b82f6" />
+              <label>透明度</label>
+              <input id="group-opacity" type="number" step="0.02" min="0" max="1" value="0.08" style="width:80px;" />
+            </div>
+          </div>
+        </div>
+
         <div class="dropdown" id="dd-io">
           <button class="menu-trigger">导入 / 导出 ▾</button>
           <div class="menu">

@@ -12,6 +12,7 @@ aside { padding: 12px; border-right: 1px solid #eee; overflow: auto; }
 #resizer.resizer:hover { background: #e5e7eb; }
 #graph { position: relative; height: 100%; }
 #graph #cy { position: absolute; inset: 0; }
+.group-box { transition: left 0.05s linear, top 0.05s linear, width 0.05s linear, height 0.05s linear; }
 button { padding: 6px 10px; cursor: pointer; }
 input, select { padding: 6px; }
 .field-row { display: grid; grid-template-columns: 1fr 100px 1fr auto; gap: 6px; margin-bottom: 6px; }
@@ -19,6 +20,8 @@ input, select { padding: 6px; }
 .hint { color: #6b7280; }
 .import input[type=file] { display: none; }
 .faded { opacity: 0.15; }
+/* 选中节点高亮 */
+.cy-selected { outline: 3px solid #3b82f6; outline-offset: 2px; border-radius: 9999px; }
 textarea[data-v] { width: 100%; min-height: 96px; padding: 6px; line-height: 1.4; resize: vertical; font-family: inherit; font-size: 14px; }
 
 /* Dropdown menus */
