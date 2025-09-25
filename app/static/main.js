@@ -107,8 +107,8 @@ function renderGraph(nodes, edges) {
   { selector: 'node:selected', style: { 'border-color': 'data(selColor)', 'border-width': 4, 'shadow-blur': 12, 'shadow-color': 'data(selColor)', 'shadow-opacity': 0.8, 'shadow-offset-x': 0, 'shadow-offset-y': 0 } },
   { selector: 'edge', style: { 'curve-style': 'unbundled-bezier', 'edge-distances': 'node-position', 'line-color': '#CBD5E1', 'width': 2, 'label': 'data(label)', 'font-size': 10, 'text-background-opacity': 1, 'text-background-color': '#fff', 'text-background-padding': 2, 'target-arrow-shape': 'triangle', 'target-arrow-color': '#CBD5E1', 'control-point-distance': 'data(cpd)', 'control-point-weight': 0.5, 'text-rotation': 'autorotate' } },
   // 聚焦模式：非邻域淡化
-  { selector: 'node.faded', style: { 'opacity': 0.15, 'text-opacity': 0.2 } },
-  { selector: 'edge.faded', style: { 'opacity': 0.12, 'text-opacity': 0.0 } },
+  { selector: 'node.faded', style: { 'opacity': 0.15, 'text-opacity': 0.2, 'events': 'no' } },
+  { selector: 'edge.faded', style: { 'opacity': 0.12, 'text-opacity': 0.0, 'events': 'no' } },
   // 根据弧度方向微调文本，向上弯时上移 6px，向下弯时下移 6px
   { selector: 'edge[cpd > 0]', style: { 'text-margin-y': -6 } },
   { selector: 'edge[cpd < 0]', style: { 'text-margin-y': 6 } },
@@ -201,6 +201,7 @@ function renderGraph(nodes, edges) {
 
   // 在每次渲染后绑定：点击手动连线删除
   cy.on('tap', 'edge.manual', async (evt) => {
+  if (focusNodeId && evt.target.hasClass('faded')) return;
     const edge = evt.target;
     const id = edge.id();
     if (confirm('删除该手动连接？')) {
@@ -211,6 +212,7 @@ function renderGraph(nodes, edges) {
 
   // 点击自动连线：抑制该条自动关联
   cy.on('tap', 'edge.auto', async (evt) => {
+  if (focusNodeId && evt.target.hasClass('faded')) return;
     const edge = evt.target;
     const a = edge.data('source');
     const b = edge.data('target');
@@ -1161,8 +1163,8 @@ function updateFocusBySelection() {
   if (!cy) return;
   cy.batch(() => {
     // 先清除淡化
-    cy.nodes().removeClass('faded');
-    cy.edges().removeClass('faded');
+  cy.nodes().removeClass('faded').selectify().grabify();
+  cy.edges().removeClass('faded');
     // 未处于聚焦模式，直接返回
     if (!focusNodeId) return;
     const node = cy.getElementById(focusNodeId);
@@ -1204,8 +1206,10 @@ function updateFocusBySelection() {
       });
     }
 
-    // 应用淡化：仅保留 keepNodes 与 keepEdges
-    cy.nodes().forEach(n => { if (!keepNodes.has(n.id())) n.addClass('faded'); });
+    // 应用淡化：仅保留 keepNodes 与 keepEdges；被淡化的节点禁止选中/拖拽
+    cy.nodes().forEach(n => {
+      if (!keepNodes.has(n.id())) { n.addClass('faded'); n.unselect(); n.ungrabify(); n.unselectify(); }
+    });
     cy.edges().forEach(e => { if (!keepEdges.has(e.id())) e.addClass('faded'); });
   });
 }
