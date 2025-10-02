@@ -1087,28 +1087,40 @@ async function bootstrap() {
     URL.revokeObjectURL(url);
   };
 
-  // 导出 PNG（当前可见图层）；优先 Blob，失败则使用 dataURL
+  // 导出 PNG（鲁棒版）：先全图 Blob，失败则降低 scale；再降级 base64；最后仅导出视窗
   const btnPng = document.getElementById('btn-export-png');
   if (btnPng && !btnPng.dataset.bound) {
     btnPng.dataset.bound = '1';
     btnPng.onclick = async () => {
       if (!cy) return;
-      try {
-        // scale: 放大导出清晰度；full: 使用内容大小；bg: 白底
-        const blob = await cy.png({ output: 'blob', full: true, scale: 2, bg: '#ffffff' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url; a.download = 'graph.png'; a.click();
-        URL.revokeObjectURL(url);
-      } catch (e) {
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      const fname = `graph-${ts}.png`;
+      const makeDownload = (href) => { const a = document.createElement('a'); a.href = href; a.download = fname; a.click(); };
+      const scales = [2, 1.5, 1, 0.75, 0.5, 0.35, 0.25];
+      // 1) 全图 Blob，递减 scale
+      for (const s of scales) {
         try {
-          const data = cy.png({ output: 'base64uri', full: true, scale: 2, bg: '#ffffff' });
-          const a = document.createElement('a');
-          a.href = data; a.download = 'graph.png'; a.click();
-        } catch (e2) {
-          alert('导出 PNG 失败');
-        }
+          const blob = await cy.png({ output: 'blob', full: true, scale: s, bg: '#ffffff' });
+          if (blob && blob.size > 0) { const url = URL.createObjectURL(blob); makeDownload(url); setTimeout(()=>URL.revokeObjectURL(url),1500); return; }
+        } catch {}
       }
+      // 2) 全图 base64，递减 scale
+      for (const s of scales) {
+        try {
+          const data = cy.png({ output: 'base64uri', full: true, scale: s, bg: '#ffffff' });
+          if (data && typeof data === 'string' && data.startsWith('data:image/png')) { makeDownload(data); return; }
+        } catch {}
+      }
+      // 3) 仅视窗 Blob/base64
+      try {
+        const blob = await cy.png({ output: 'blob', full: false, scale: 2, bg: '#ffffff' });
+        const url = URL.createObjectURL(blob); makeDownload(url); setTimeout(()=>URL.revokeObjectURL(url),1500); return;
+      } catch {}
+      try {
+        const data = cy.png({ output: 'base64uri', full: false, scale: 2, bg: '#ffffff' });
+        makeDownload(data); return;
+      } catch {}
+      alert('导出 PNG 失败：图像过大或内存不足，请缩小范围或降低清晰度重试。');
     };
   }
 
