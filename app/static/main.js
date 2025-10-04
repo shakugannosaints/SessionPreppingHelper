@@ -6,6 +6,7 @@ let sidebarWidth = 320;
 const edgeCpd = new Map();
 // cached groups for fast overlay rendering
 let cachedGroups = [];
+const groupDomCache = new Map();
 let rafGroups = null;
 // debounced saver for node positions after drag
 let dragSaveTimer = null;
@@ -456,8 +457,6 @@ function renderGroups() {
   const groups = Array.isArray(cachedGroups) ? cachedGroups : [];
   const container = document.getElementById('graph');
   if (!container || !cy) return;
-  // 清理旧 DOM
-  [...container.querySelectorAll('.group-box, .group-label')].forEach(x => x.remove());
   const pan = cy.pan(); const zoom = cy.zoom() || 1;
   const toScreen = (p) => ({ x: p.x * zoom + pan.x, y: p.y * zoom + pan.y });
   const hexToRgba = (hex, alpha) => {
@@ -489,49 +488,61 @@ function renderGroups() {
       labelEl.style.top = (tl.y + 4) + 'px';
     }
   };
-  groups.forEach(g => {
+  const activeKeys = new Set();
+  groups.forEach((g, idx) => {
     const ids = (g.members || []).filter(Boolean);
     const eles = cy.collection(ids.map(id => cy.getElementById(id))).filter('node');
     if (!eles || eles.length === 0) return;
     const color = g.color || '#3b82f6';
     const opacity = (typeof g.opacity === 'number') ? g.opacity : 0.08;
-    const box = document.createElement('div');
-    box.className = 'group-box';
-    box.style.position = 'absolute';
-    box.style.borderRadius = '8px';
-    box.style.pointerEvents = 'none';
-    box.style.userSelect = 'none';
-    box.style.zIndex = 2;
-    container.appendChild(box);
+    const key = g.id != null ? String(g.id) : `__auto_${ids.slice().sort().join('|')}_${g.label || ''}`;
+    let entry = groupDomCache.get(key);
+    if (!entry) {
+      const box = document.createElement('div');
+      box.className = 'group-box';
+      box.style.position = 'absolute';
+      box.style.borderRadius = '8px';
+      box.style.pointerEvents = 'none';
+      box.style.userSelect = 'none';
+      box.style.zIndex = 2;
 
-    const lbl = document.createElement('div');
-    lbl.className = 'group-label';
-    lbl.textContent = g.label || '编组';
-    lbl.style.position = 'absolute';
-    lbl.style.padding = '2px 6px';
-    lbl.style.background = '#fff';
-    lbl.style.border = '1px solid #e5e7eb';
-    lbl.style.borderRadius = '6px';
-    lbl.style.fontSize = '12px';
-    lbl.style.cursor = 'move';
-    lbl.style.zIndex = 3;
-    container.appendChild(lbl);
+      const lbl = document.createElement('div');
+      lbl.className = 'group-label';
+      lbl.style.position = 'absolute';
+      lbl.style.padding = '2px 6px';
+      lbl.style.background = '#fff';
+      lbl.style.border = '1px solid #e5e7eb';
+      lbl.style.borderRadius = '6px';
+      lbl.style.fontSize = '12px';
+      lbl.style.cursor = 'move';
+      lbl.style.zIndex = 3;
 
-    updateBox(eles, color, opacity, box, lbl);
+      entry = { box, label: lbl };
+      groupDomCache.set(key, entry);
+    }
 
-    // 拖动编组：移动所有成员节点，并实时更新可视框
-    lbl.addEventListener('mousedown', (ev) => {
+    const { box, label } = entry;
+    if (!box.isConnected) container.appendChild(box);
+    if (!label.isConnected) container.appendChild(label);
+
+    label.textContent = g.label || '编组';
+    label.dataset.groupKey = key;
+
+    updateBox(eles, color, opacity, box, label);
+
+    label.onmousedown = (ev) => {
       ev.preventDefault(); ev.stopPropagation();
       let start = { x: ev.clientX, y: ev.clientY };
       const onMove = (mv) => {
-        const dx = (mv.clientX - start.x) / (cy.zoom() || 1);
-        const dy = (mv.clientY - start.y) / (cy.zoom() || 1);
+        const dz = cy.zoom() || 1;
+        const dx = (mv.clientX - start.x) / dz;
+        const dy = (mv.clientY - start.y) / dz;
         start = { x: mv.clientX, y: mv.clientY };
         eles.forEach(n => {
           const p = n.position();
           n.position({ x: p.x + dx, y: p.y + dy });
         });
-        updateBox(eles, color, opacity, box, lbl);
+        updateBox(eles, color, opacity, box, label);
       };
       const onUp = async () => {
         window.removeEventListener('mousemove', onMove);
@@ -546,7 +557,17 @@ function renderGroups() {
       };
       window.addEventListener('mousemove', onMove);
       window.addEventListener('mouseup', onUp);
-    });
+    };
+
+    activeKeys.add(key);
+  });
+
+  groupDomCache.forEach((entry, key) => {
+    if (!activeKeys.has(key)) {
+      if (entry.box?.isConnected) entry.box.remove();
+      if (entry.label?.isConnected) entry.label.remove();
+      groupDomCache.delete(key);
+    }
   });
 }
 
@@ -979,11 +1000,6 @@ async function bootstrap() {
         cy.nodes().style('display', 'element');
         cy.edges().style('display', 'element');
       });
-      // 清空搜索时，恢复显示 + 应用聚焦态
-      cy.batch(() => {
-        cy.nodes().style('display', 'element');
-        cy.edges().style('display', 'element');
-      });
       updateFocusBySelection();
       return;
     }
@@ -1193,29 +1209,37 @@ function updateFocusBySelection() {
     cy.nodes().forEach(n => { if (n.style('display') !== 'none') visibleNodes.add(n.id()); });
     const visibleEdges = cy.edges().filter(e => e.style('display') !== 'none');
 
+    const adjacency = new Map();
+    visibleEdges.forEach(e => {
+      const s = e.data('source');
+      const t = e.data('target');
+      if (!visibleNodes.has(s) || !visibleNodes.has(t)) return;
+      const edgeId = e.id();
+      if (!adjacency.has(s)) adjacency.set(s, []);
+      if (!adjacency.has(t)) adjacency.set(t, []);
+      adjacency.get(s).push({ node: t, edgeId });
+      adjacency.get(t).push({ node: s, edgeId });
+    });
+
     const queue = [{ id: node.id(), d: 0 }];
     const seen = new Set([node.id()]);
     const keepNodes = new Set([node.id()]);
     const keepEdges = new Set();
 
-    while (queue.length) {
-      const cur = queue.shift();
+    for (let i = 0; i < queue.length; i++) {
+      const cur = queue[i];
       if (cur.d >= depth) continue;
-      // 从当前节点出发，考虑其可见邻接边与对端
-      visibleEdges.forEach(e => {
-        const s = e.data('source');
-        const t = e.data('target');
-        if (s === cur.id || t === cur.id) {
-          const other = (s === cur.id) ? t : s;
-          if (!visibleNodes.has(other)) return; // 对端被隐藏则忽略
-          keepEdges.add(e.id());
-          keepNodes.add(other);
-          if (!seen.has(other)) {
-            seen.add(other);
-            queue.push({ id: other, d: cur.d + 1 });
-          }
+      const neighbors = adjacency.get(cur.id);
+      if (!neighbors) continue;
+      for (let j = 0; j < neighbors.length; j++) {
+        const { node: other, edgeId } = neighbors[j];
+        keepEdges.add(edgeId);
+        keepNodes.add(other);
+        if (!seen.has(other)) {
+          seen.add(other);
+          queue.push({ id: other, d: cur.d + 1 });
         }
-      });
+      }
     }
 
     // 应用淡化：仅保留 keepNodes 与 keepEdges；被淡化的节点禁止选中/拖拽
