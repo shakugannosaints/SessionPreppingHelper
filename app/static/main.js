@@ -319,15 +319,16 @@ async function refresh(preservePositions = true) {
 
 function editorHtml(node) {
   const fields = node.fields || [];
+  const editableFields = fields.filter(f => String(f?.key || '') !== '大小倍率');
   const scaleVal = getSizeScale(fields);
   return `
     <div>
   <div class="muted" style="margin-bottom:6px;">ID: ${(node.id ?? '').toString().replace(/</g,'&lt;')}</div>
-      <div class="field-row">
-        <label style="min-width:72px;display:inline-block;">大小倍率</label>
-        <input id="size-scale" type="number" step="0.1" min="0.5" value="${scaleVal}" style="width:92px;" />
+      <div class="field-row field-row-scale">
+        <label for="size-scale">大小倍率</label>
+        <input id="size-scale" type="number" step="0.1" min="0.5" value="${scaleVal}" />
       </div>
-      ${fields.map((f, i) => `
+      ${editableFields.map((f, i) => `
         <div class="field-row">
           <input data-k ${attr('value', f.key)} placeholder="字段名">
           <select data-t>
@@ -419,20 +420,22 @@ function updateEditor(id) {
   el.querySelectorAll('[data-del]').forEach((btn, idx) => btn.onclick = () => {
     // 删除前先取当前所有值，避免丢失未保存的编辑内容
     const rows = [...el.querySelectorAll('.field-row')];
-    node.fields = rows.filter(r => r.querySelector('[data-k]')).map(r => ({
+    const list = rows.filter(r => r.querySelector('[data-k]')).map(r => ({
       key: r.querySelector('[data-k]').value,
       type: r.querySelector('[data-t]').value,
       value: r.querySelector('[data-v]').value,
     }));
+    // 先删除可编辑字段中的目标项
+    list.splice(idx, 1);
     // 同步大小倍率
     const scaleInput = el.querySelector('#size-scale');
     if (scaleInput) {
       const sc = Math.max(0.5, parseFloat(scaleInput.value || '1') || 1);
-      const idxx = node.fields.findIndex(f => String(f.key) === '大小倍率');
-      if (idxx >= 0) node.fields[idxx] = { key: '大小倍率', type: 'number', value: String(sc) };
-      else node.fields.unshift({ key: '大小倍率', type: 'number', value: String(sc) });
+      const idxx = list.findIndex(f => String(f.key) === '大小倍率');
+      if (idxx >= 0) list[idxx] = { key: '大小倍率', type: 'number', value: String(sc) };
+      else list.unshift({ key: '大小倍率', type: 'number', value: String(sc) });
     }
-    node.fields.splice(idx, 1);
+    node.fields = list;
     updateEditor(id);
   });
 }
