@@ -582,6 +582,51 @@ async function bootstrap() {
   await initTemplates();
   await refresh();
 
+  function setHelpOpen(open) {
+    const panel = document.getElementById('help-panel');
+    const toggleBtn = document.getElementById('btn-help-toggle');
+    if (!panel) return;
+    panel.classList.toggle('open', !!open);
+    panel.setAttribute('aria-hidden', open ? 'false' : 'true');
+    if (toggleBtn) toggleBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    try { localStorage.setItem('helpPanelOpen', open ? '1' : '0'); } catch {}
+  }
+
+  function toggleHelpPanel(forceOpen) {
+    const panel = document.getElementById('help-panel');
+    if (!panel) return;
+    const next = typeof forceOpen === 'boolean' ? forceOpen : !panel.classList.contains('open');
+    setHelpOpen(next);
+  }
+
+  function closeAllDropdowns() {
+    document.querySelectorAll('.dropdown.open').forEach(el => el.classList.remove('open'));
+  }
+
+  function clearSelectionAndFocus() {
+    if (cy) cy.elements().unselect();
+    selectedNode = null;
+    focusNodeId = null;
+    linkPick = [];
+    const status = document.getElementById('link-status');
+    if (status) status.textContent = '';
+    const editor = document.getElementById('node-editor');
+    if (editor) editor.innerHTML = '<div class="hint">选择图中的一个节点以编辑字段。</div>';
+    updateFocusBySelection();
+  }
+
+  const btnHelpToggle = document.getElementById('btn-help-toggle');
+  const btnHelpClose = document.getElementById('btn-help-close');
+  if (btnHelpToggle && !btnHelpToggle.dataset.bound) {
+    btnHelpToggle.dataset.bound = '1';
+    btnHelpToggle.addEventListener('click', () => toggleHelpPanel());
+  }
+  if (btnHelpClose && !btnHelpClose.dataset.bound) {
+    btnHelpClose.dataset.bound = '1';
+    btnHelpClose.addEventListener('click', () => setHelpOpen(false));
+  }
+  try { setHelpOpen(localStorage.getItem('helpPanelOpen') === '1'); } catch { setHelpOpen(false); }
+
   document.getElementById('btn-new-node').onclick = async () => {
     const center = getViewportCenter();
     let fields = [];
@@ -934,6 +979,18 @@ async function bootstrap() {
   else if (ev.key.toLowerCase() === 'y') { ev.preventDefault(); await axios.post('/api/redo'); await refresh(false); }
     // 复制节点：Ctrl+Shift+K（避免与浏览器快捷键冲突）
     else if (ev.shiftKey && ev.key.toLowerCase() === 'k') { ev.preventDefault(); await duplicateSelectedNode(); }
+    // 搜索框聚焦：Ctrl+F
+    else if (ev.key.toLowerCase() === 'f') {
+      ev.preventDefault();
+      const s = document.getElementById('search');
+      if (s) { s.focus(); s.select?.(); }
+    }
+    // 导出 JSON：Ctrl+S
+    else if (ev.key.toLowerCase() === 's') {
+      ev.preventDefault();
+      const btn = document.getElementById('btn-export');
+      if (btn) btn.click();
+    }
   });
 
   // 无修饰快捷键：避免在输入框中触发
@@ -941,12 +998,26 @@ async function bootstrap() {
     const tag = (ev.target && ev.target.tagName) ? ev.target.tagName.toLowerCase() : '';
     if (tag === 'input' || tag === 'textarea' || ev.target?.isContentEditable) return;
     const key = ev.key.toLowerCase();
+    // 关闭操作：Esc
+    if (key === 'escape') {
+      ev.preventDefault();
+      closeAllDropdowns();
+      setHelpOpen(false);
+      clearSelectionAndFocus();
+      return;
+    }
     // 新建节点：N
     if (key === 'n') { ev.preventDefault(); const btn = document.getElementById('btn-new-node'); if (btn) btn.click(); }
     // 开始连线：L 或 A
     else if (key === 'l' || key === 'a') { ev.preventDefault(); const btn = document.getElementById('btn-start-link'); if (btn) btn.click(); }
     // 为选中节点添加字段：F
     else if (key === 'f') { ev.preventDefault(); const b = document.querySelector('#node-editor #add-field'); if (b) b.click(); }
+    // 快速聚焦搜索：/
+    else if (key === '/') { ev.preventDefault(); const s = document.getElementById('search'); if (s) { s.focus(); s.select?.(); } }
+    // 新建编组：G（基于当前选中）
+    else if (key === 'g') { ev.preventDefault(); const btn = document.getElementById('btn-group-create'); if (btn) btn.click(); }
+    // 帮助面板开关：H / ?
+    else if (key === 'h' || ev.key === '?' || (ev.key === '/' && ev.shiftKey)) { ev.preventDefault(); toggleHelpPanel(); }
     // 删除选中：Delete / Backspace
     else if (key === 'delete' || key === 'backspace') { ev.preventDefault(); await deleteSelection(); }
   });

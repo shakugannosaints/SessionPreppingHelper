@@ -37,6 +37,7 @@
         </label>
         <button id="btn-undo" title="撤销 (Ctrl+Z)">撤销</button>
         <button id="btn-redo" title="重做 (Ctrl+Y)">重做</button>
+        <button id="btn-help-toggle" title="操作帮助 (H / ?)">操作帮助</button>
 
         <div class="dropdown" id="dd-auto">
           <button class="menu-trigger">自动关联筛选 ▾</button>
@@ -108,6 +109,59 @@
     <div id="resizer" class="resizer" title="拖动调整宽度"></div>
     <section id="graph"></section>
   </main>
+
+  <aside id="help-panel" class="help-panel" aria-hidden="true">
+    <div class="help-head">
+      <h2>操作帮助</h2>
+      <button id="btn-help-close" type="button" aria-label="关闭帮助">关闭</button>
+    </div>
+    <div class="help-body">
+      <h3>快捷键速查</h3>
+      <table class="help-table">
+        <tbody>
+          <tr><td>Ctrl+Z</td><td>撤销</td></tr>
+          <tr><td>Ctrl+Y</td><td>重做</td></tr>
+          <tr><td>Ctrl+Shift+K</td><td>复制选中节点</td></tr>
+          <tr><td>Ctrl+F 或 /</td><td>聚焦到搜索框</td></tr>
+          <tr><td>Ctrl+S</td><td>导出 JSON</td></tr>
+          <tr><td>N</td><td>新建节点</td></tr>
+          <tr><td>L 或 A</td><td>开始手动连线（选两个节点）</td></tr>
+          <tr><td>F</td><td>给当前节点新增字段</td></tr>
+          <tr><td>G</td><td>以当前选中创建编组</td></tr>
+          <tr><td>Delete / Backspace</td><td>删除选中节点/连线</td></tr>
+          <tr><td>Esc</td><td>取消选择、退出聚焦、关闭面板</td></tr>
+          <tr><td>H 或 ?</td><td>展开/隐藏操作帮助</td></tr>
+        </tbody>
+      </table>
+
+      <h3>搜索说明</h3>
+      <p class="help-p">搜索支持值匹配与键值匹配，支持 OR/AND 组合。</p>
+      <ul class="help-list">
+        <li>纯关键词：在所有字段值中匹配，例如 <code>旅店</code></li>
+        <li>键值：<code>名称:旅店</code>、<code>标签:地点</code></li>
+        <li>显式键名：<code>key:名称</code>，显式值：<code>value:旅店</code></li>
+        <li>逻辑：<code>A OR B</code>、<code>A AND B</code>，也支持 <code>或/与</code>、<code>||/&&</code></li>
+      </ul>
+
+      <h3>聚焦层数</h3>
+      <p class="help-p">双击同一节点进入聚焦；空白处点击或按 Esc 退出。聚焦层数表示从中心节点向外保留的关系层级，其他节点和边会淡化。</p>
+
+      <h3>编组说明</h3>
+      <ul class="help-list">
+        <li>先选中多个节点，再点击“新建编组(以当前选中)”或按 G</li>
+        <li>可设置编组颜色和透明度</li>
+        <li>拖动编组标签可整体移动该编组内节点</li>
+        <li>在“编组 ▾”菜单中可编辑成员和删除编组</li>
+      </ul>
+
+      <h3>其他操作</h3>
+      <ul class="help-list">
+        <li>按住 Ctrl/Shift 点击节点可多选</li>
+        <li>Shift + 拖动连线可调整弧度</li>
+        <li>点击自动连线可隐藏，左侧“被隐藏的自动关联”可恢复</li>
+      </ul>
+    </div>
+  </aside>
 
   <script src="/static/main.js"></script>
 </body>
