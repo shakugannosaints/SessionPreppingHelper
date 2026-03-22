@@ -16,6 +16,8 @@ aside { padding: 12px; border-right: 1px solid #eee; overflow: auto; }
 button { padding: 6px 10px; cursor: pointer; }
 input, select { padding: 6px; }
 .field-row { display: grid; grid-template-columns: 1fr 100px 1fr auto; gap: 6px; margin-bottom: 6px; }
+.field-row > * { min-width: 0; }
+.field-row [data-k], .field-row [data-v], .field-row [data-t] { width: 100%; min-width: 0; }
 .field-row-scale { grid-template-columns: 100px 1fr; align-items: center; }
 .field-row-scale label { white-space: nowrap; }
 .field-row-scale #size-scale { width: 100%; min-width: 0; }
