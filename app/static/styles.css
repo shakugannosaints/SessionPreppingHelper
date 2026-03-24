@@ -13,6 +13,39 @@ aside { padding: 12px; border-right: 1px solid #eee; overflow: auto; }
 #graph { position: relative; height: 100%; min-width: 0; overflow: hidden; }
 #graph #cy { position: absolute; inset: 0; }
 .group-box { transition: left 0.05s linear, top 0.05s linear, width 0.05s linear, height 0.05s linear; }
+.group-overlay { position: absolute; inset: 0; pointer-events: none; z-index: 2; overflow: visible; }
+.group-path { pointer-events: none; stroke-dasharray: 8 6; transition: opacity 0.08s linear; }
+.group-member-badge {
+  position: absolute;
+  min-width: 24px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.88);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: center;
+  pointer-events: none;
+  user-select: none;
+  z-index: 4;
+}
+.group-manager { width: min(720px, 86vw); }
+.group-manager-head { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.group-manager-body { display: grid; grid-template-columns: 220px minmax(280px, 1fr); gap: 10px; align-items: start; }
+.group-manager-list-wrap { border: 1px solid #e5e7eb; border-radius: 8px; max-height: 320px; overflow: auto; background: #fafafa; }
+.group-manager-list { display: flex; flex-direction: column; }
+.group-list-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%; padding: 8px 10px; border: 0; border-bottom: 1px solid #eef2f7; background: transparent; text-align: left; }
+.group-list-row:last-child { border-bottom: 0; }
+.group-list-row.active { background: #e0f2fe; }
+.group-list-empty { padding: 10px; color: #6b7280; }
+.group-manager-editor { display: flex; flex-direction: column; gap: 8px; }
+.group-form-row { display: grid; grid-template-columns: 56px 1fr; align-items: center; gap: 8px; }
+.group-form-row input[type="number"] { width: 100px; }
+.group-actions-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.group-members-panel { display: flex; flex-direction: column; gap: 6px; }
+.group-members { display: flex; gap: 6px; flex-wrap: wrap; min-height: 36px; padding: 8px; border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; }
+.group-member-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 999px; background: #eff6ff; border: 1px solid #bfdbfe; }
+.group-member-chip button { padding: 0; width: 18px; height: 18px; border: 0; border-radius: 999px; background: #dbeafe; }
 button { padding: 6px 10px; cursor: pointer; }
 input, select { padding: 6px; }
 .field-row { display: grid; grid-template-columns: 1fr 100px 1fr auto; gap: 6px; margin-bottom: 6px; }

@@ -7,6 +7,8 @@ const edgeCpd = new Map();
 // cached groups for fast overlay rendering
 let cachedGroups = [];
 const groupDomCache = new Map();
+const groupBadgeCache = new Map();
+let groupOverlaySvg = null;
 let rafGroups = null;
 // debounced saver for node positions after drag
 let dragSaveTimer = null;
@@ -574,6 +576,202 @@ function renderGroups() {
   });
 }
 
+function renderGroups() {
+  const groups = Array.isArray(cachedGroups) ? cachedGroups : [];
+  const container = document.getElementById('graph');
+  if (!container || !cy) return;
+  const ensureOverlaySvg = () => {
+    if (groupOverlaySvg?.isConnected) return groupOverlaySvg;
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.classList.add('group-overlay');
+    svg.setAttribute('aria-hidden', 'true');
+    container.appendChild(svg);
+    groupOverlaySvg = svg;
+    return svg;
+  };
+  const svg = ensureOverlaySvg();
+  svg.setAttribute('width', String(container.clientWidth || 0));
+  svg.setAttribute('height', String(container.clientHeight || 0));
+  svg.setAttribute('viewBox', `0 0 ${container.clientWidth || 0} ${container.clientHeight || 0}`);
+  const hexToRgba = (hex, alpha) => {
+    try {
+      if (!hex) return `rgba(59,130,246,${alpha ?? 0.08})`;
+      let h = hex.trim();
+      if (h.startsWith('#')) h = h.slice(1);
+      if (h.length === 3) h = h.split('').map(c => c + c).join('');
+      const r = parseInt(h.slice(0,2), 16);
+      const g = parseInt(h.slice(2,4), 16);
+      const b = parseInt(h.slice(4,6), 16);
+      const a = (typeof alpha === 'number' ? alpha : 0.08);
+      return `rgba(${r},${g},${b},${a})`;
+    } catch { return `rgba(59,130,246,${alpha ?? 0.08})`; }
+  };
+  const intersects = (a, b) => !!a && !!b && a.x1 < b.x2 && a.x2 > b.x1 && a.y1 < b.y2 && a.y2 > b.y1;
+  const inflateRect = (bb, padX, padY = padX) => ({
+    x1: bb.x1 - padX,
+    y1: bb.y1 - padY,
+    x2: bb.x2 + padX,
+    y2: bb.y2 + padY,
+  });
+  const roundedRectPath = (bb, radius = 14) => {
+    const w = Math.max(0, bb.x2 - bb.x1);
+    const h = Math.max(0, bb.y2 - bb.y1);
+    const r = Math.max(0, Math.min(radius, w / 2, h / 2));
+    return [
+      `M ${bb.x1 + r} ${bb.y1}`,
+      `H ${bb.x2 - r}`,
+      `A ${r} ${r} 0 0 1 ${bb.x2} ${bb.y1 + r}`,
+      `V ${bb.y2 - r}`,
+      `A ${r} ${r} 0 0 1 ${bb.x2 - r} ${bb.y2}`,
+      `H ${bb.x1 + r}`,
+      `A ${r} ${r} 0 0 1 ${bb.x1} ${bb.y2 - r}`,
+      `V ${bb.y1 + r}`,
+      `A ${r} ${r} 0 0 1 ${bb.x1 + r} ${bb.y1}`,
+      'Z',
+    ].join(' ');
+  };
+  const updatePath = (group, els, memberIdSet, color, opacity, pathEl, labelEl) => {
+    const outerPad = 30;
+    const avoidPad = 18;
+    const overlapTolerance = 12;
+    const bb = inflateRect(els.renderedBoundingBox({ includeLabels: false, includeOverlays: false }), outerPad);
+    const memberRects = [];
+    els.forEach((node) => {
+      memberRects.push(inflateRect(node.renderedBoundingBox({ includeLabels: false, includeOverlays: false }), 8));
+    });
+    const holes = [];
+    let conflictCount = 0;
+    cy.nodes().forEach((node) => {
+      if (memberIdSet.has(node.id())) return;
+      const nodeBb = node.renderedBoundingBox({ includeLabels: false, includeOverlays: false });
+      if (!intersects(nodeBb, bb)) return;
+      const overlapsMember = memberRects.some((rect) => intersects(rect, inflateRect(nodeBb, overlapTolerance)));
+      if (overlapsMember) {
+        conflictCount += 1;
+        return;
+      }
+      const holeBb = inflateRect(nodeBb, avoidPad);
+      holes.push(roundedRectPath(holeBb, Math.min(22, Math.max(12, Math.min(holeBb.x2 - holeBb.x1, holeBb.y2 - holeBb.y1) / 2))));
+    });
+    pathEl.setAttribute('d', [roundedRectPath(bb, 16), ...holes].join(' '));
+    pathEl.setAttribute('fill', hexToRgba(color, opacity));
+    pathEl.setAttribute('stroke', color);
+    pathEl.setAttribute('stroke-width', '1.5');
+    pathEl.setAttribute('fill-rule', 'evenodd');
+    if (labelEl) {
+      labelEl.style.left = `${bb.x1 + 8}px`;
+      labelEl.style.top = `${bb.y1 + 4}px`;
+      labelEl.textContent = conflictCount > 0 ? `${group.label || 'Group'} * ${conflictCount} overlap` : (group.label || 'Group');
+    }
+  };
+  const membershipCount = new Map();
+  groups.forEach((g) => {
+    (g.members || []).filter(Boolean).forEach((id) => {
+      membershipCount.set(id, (membershipCount.get(id) || 0) + 1);
+    });
+  });
+  const activeKeys = new Set();
+  groups.forEach((g) => {
+    const ids = (g.members || []).filter(Boolean);
+    const eles = cy.collection(ids.map(id => cy.getElementById(id))).filter('node');
+    if (!eles || eles.length === 0) return;
+    const color = g.color || '#3b82f6';
+    const opacity = (typeof g.opacity === 'number') ? g.opacity : 0.08;
+    const key = g.id != null ? String(g.id) : `__auto_${ids.slice().sort().join('|')}_${g.label || ''}`;
+    const memberIdSet = new Set(ids);
+    let entry = groupDomCache.get(key);
+    if (!entry) {
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.classList.add('group-path');
+
+      const lbl = document.createElement('div');
+      lbl.className = 'group-label';
+      lbl.style.position = 'absolute';
+      lbl.style.padding = '2px 6px';
+      lbl.style.background = '#fff';
+      lbl.style.border = '1px solid #e5e7eb';
+      lbl.style.borderRadius = '6px';
+      lbl.style.fontSize = '12px';
+      lbl.style.cursor = 'move';
+      lbl.style.zIndex = 3;
+
+      entry = { path, label: lbl };
+      groupDomCache.set(key, entry);
+    }
+
+    const { path, label } = entry;
+    if (!path.isConnected) svg.appendChild(path);
+    if (!label.isConnected) container.appendChild(label);
+
+    label.dataset.groupKey = key;
+    updatePath(g, eles, memberIdSet, color, opacity, path, label);
+
+    label.onmousedown = (ev) => {
+      ev.preventDefault(); ev.stopPropagation();
+      let start = { x: ev.clientX, y: ev.clientY };
+      const onMove = (mv) => {
+        const dz = cy.zoom() || 1;
+        const dx = (mv.clientX - start.x) / dz;
+        const dy = (mv.clientY - start.y) / dz;
+        start = { x: mv.clientX, y: mv.clientY };
+        eles.forEach(n => {
+          const p = n.position();
+          n.position({ x: p.x + dx, y: p.y + dy });
+        });
+        updatePath(g, eles, memberIdSet, color, opacity, path, label);
+      };
+      const onUp = async () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        for (let i = 0; i < eles.length; i++) {
+          const n = eles[i];
+          const id = n.id();
+          const pos = n.position();
+          try { await axios.put(`/api/nodes/${id}`, { position: pos }); } catch {}
+        }
+        renderGroups();
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    };
+
+    activeKeys.add(key);
+  });
+
+  groupDomCache.forEach((entry, key) => {
+    if (!activeKeys.has(key)) {
+      if (entry.path?.isConnected) entry.path.remove();
+      if (entry.label?.isConnected) entry.label.remove();
+      groupDomCache.delete(key);
+    }
+  });
+
+  const activeBadgeIds = new Set();
+  membershipCount.forEach((count, nodeId) => {
+    if (count <= 1) return;
+    const node = cy.getElementById(nodeId);
+    if (!node || node.empty()) return;
+    const bb = node.renderedBoundingBox({ includeLabels: false, includeOverlays: false });
+    let badge = groupBadgeCache.get(nodeId);
+    if (!badge) {
+      badge = document.createElement('div');
+      badge.className = 'group-member-badge';
+      container.appendChild(badge);
+      groupBadgeCache.set(nodeId, badge);
+    }
+    badge.textContent = `x${count}`;
+    badge.style.left = `${bb.x2 - 10}px`;
+    badge.style.top = `${bb.y1 - 10}px`;
+    activeBadgeIds.add(nodeId);
+  });
+  groupBadgeCache.forEach((badge, nodeId) => {
+    if (!activeBadgeIds.has(nodeId)) {
+      if (badge?.isConnected) badge.remove();
+      groupBadgeCache.delete(nodeId);
+    }
+  });
+}
+
 async function refreshGroupsCache() {
   try {
     const { data } = await axios.get('/api/groups');
@@ -777,7 +975,7 @@ async function bootstrap() {
         const opening = !root.classList.contains('open');
         root.classList.toggle('open');
         // 当打开编组菜单时，拉取并填充编组列表
-        if (opening && id === 'dd-group') {
+        if (opening && id === 'dd-group' && root.querySelector('.menu')?.dataset.enhanced !== '1') {
           try {
             const { data } = await axios.get('/api/groups');
             cachedGroups = Array.isArray(data) ? data : [];
@@ -918,6 +1116,187 @@ async function bootstrap() {
       } catch { alert('删除失败'); }
     };
   }
+
+  let currentGroupId = null;
+  const getSelectedNodeIds = () => {
+    const sel = cy ? cy.nodes(':selected') : null;
+    return sel ? sel.map(n => n.id()) : [];
+  };
+  const getNodeDisplayName = (id) => {
+    const raw = getNodeById(id);
+    if (!raw) return id;
+    const fields = raw.fields || [];
+    const nameField = fields.find(f => f.key === '名称') || fields.find(f => f.type === 'text');
+    const label = nameField ? String(nameField.value || '').trim() : '';
+    return label || id;
+  };
+  const getCurrentGroup = () => cachedGroups.find(g => g.id === currentGroupId) || null;
+  const setGroupStatus = (text = '') => {
+    const el = document.getElementById('group-manager-status');
+    if (el) el.textContent = text;
+  };
+  const renderGroupManager = () => {
+    const listEl = document.getElementById('group-manager-list');
+    const current = getCurrentGroup();
+    const nameEl = document.getElementById('group-name');
+    const colorEl = document.getElementById('group-color');
+    const opacityEl = document.getElementById('group-opacity');
+    const membersEl = document.getElementById('group-members');
+    if (!listEl || !nameEl || !colorEl || !opacityEl || !membersEl) return;
+    listEl.innerHTML = '';
+    if (!cachedGroups.length) {
+      listEl.innerHTML = '<div class="group-list-empty">No groups yet</div>';
+    } else {
+      cachedGroups.forEach((g) => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = `group-list-row${g.id === currentGroupId ? ' active' : ''}`;
+        row.innerHTML = `<span>${g.label || 'Group'}</span><span class="muted">${(g.members || []).length}</span>`;
+        row.onclick = () => {
+          currentGroupId = g.id;
+          setGroupStatus('');
+          renderGroupManager();
+        };
+        listEl.appendChild(row);
+      });
+    }
+    if (!current) {
+      nameEl.value = '';
+      colorEl.value = '#3b82f6';
+      opacityEl.value = '0.08';
+      membersEl.innerHTML = '<div class="group-list-empty">Select nodes and create a group.</div>';
+      return;
+    }
+    nameEl.value = current.label || '';
+    colorEl.value = current.color || '#3b82f6';
+    opacityEl.value = String(typeof current.opacity === 'number' ? current.opacity : 0.08);
+    membersEl.innerHTML = '';
+    (current.members || []).forEach((id) => {
+      const chip = document.createElement('div');
+      chip.className = 'group-member-chip';
+      chip.innerHTML = `<span>${getNodeDisplayName(id)}</span>`;
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.textContent = 'x';
+      removeBtn.onclick = async () => {
+        await axios.put(`/api/groups/${current.id}`, { members: (current.members || []).filter(x => x !== id) });
+        await refreshGroupsCache();
+        renderGroups();
+        renderGroupManager();
+        setGroupStatus(`Removed ${getNodeDisplayName(id)}`);
+      };
+      chip.appendChild(removeBtn);
+      membersEl.appendChild(chip);
+    });
+    if (!(current.members || []).length) {
+      membersEl.innerHTML = '<div class="group-list-empty">No members</div>';
+    }
+  };
+  const openGroupManager = async () => {
+    await refreshGroupsCache();
+    if (!currentGroupId || !getCurrentGroup()) currentGroupId = cachedGroups[0]?.id || null;
+    renderGroupManager();
+  };
+  const setupGroupManager = () => {
+    const root = document.getElementById('dd-group');
+    const menu = root ? root.querySelector('.menu') : null;
+    const trigger = root ? root.querySelector('.menu-trigger') : null;
+    if (!menu || !trigger || menu.dataset.enhanced === '1') return;
+    menu.dataset.enhanced = '1';
+    menu.innerHTML = `
+      <div class="group-manager">
+        <div class="group-manager-head">
+          <button id="btn-group-create">以备选节点创建</button>
+          <button id="btn-group-save">保存编组</button>
+          <button id="btn-group-delete">删除编组</button>
+        </div>
+        <div class="group-manager-body">
+          <div class="group-manager-list-wrap">
+            <div id="group-manager-list" class="group-manager-list"></div>
+          </div>
+          <div class="group-manager-editor">
+            <div class="group-form-row">
+              <label for="group-name">名称</label>
+              <input id="group-name" type="text" placeholder="Group name" />
+            </div>
+            <div class="group-form-row">
+              <label for="group-color">颜色</label>
+              <input id="group-color" type="color" value="#3b82f6" />
+            </div>
+            <div class="group-form-row">
+              <label for="group-opacity">不透明度</label>
+              <input id="group-opacity" type="number" step="0.02" min="0" max="1" value="0.08" />
+            </div>
+            <div class="group-actions-row">
+              <button id="btn-group-add-selected">添加选中节点</button>
+              <button id="btn-group-remove-selected">移除选中节点</button>
+            </div>
+            <div class="group-members-panel">
+              <div class="muted">成员节点</div>
+              <div id="group-members" class="group-members"></div>
+            </div>
+            <div id="group-manager-status" class="muted"></div>
+          </div>
+        </div>
+      </div>
+    `;
+    menu.addEventListener('click', async (ev) => {
+      const target = ev.target.closest('button');
+      if (!target) return;
+      if (target.id === 'btn-group-create') {
+        const ids = getSelectedNodeIds();
+        if (!ids.length) { alert('Please select at least one node first.'); return; }
+        const label = (document.getElementById('group-name')?.value || '').trim() || `Group ${cachedGroups.length + 1}`;
+        const color = (document.getElementById('group-color')?.value) || '#3b82f6';
+        const opacityVal = parseFloat(document.getElementById('group-opacity')?.value || '0.08') || 0.08;
+        const { data } = await axios.post('/api/groups', { label, members: ids, color, opacity: opacityVal });
+        currentGroupId = data.id;
+        await openGroupManager();
+        renderGroups();
+        setGroupStatus(`Created ${label}`);
+      } else if (target.id === 'btn-group-save') {
+        const current = getCurrentGroup();
+        if (!current) return;
+        const label = (document.getElementById('group-name')?.value || '').trim() || current.label || 'Group';
+        const color = (document.getElementById('group-color')?.value) || current.color || '#3b82f6';
+        const rawOpacity = parseFloat(document.getElementById('group-opacity')?.value || String(current.opacity ?? '0.08'));
+        const opacityVal = Number.isFinite(rawOpacity) ? Math.max(0, Math.min(1, rawOpacity)) : (current.opacity ?? 0.08);
+        await axios.put(`/api/groups/${current.id}`, { label, color, opacity: opacityVal, members: current.members || [] });
+        await openGroupManager();
+        renderGroups();
+        setGroupStatus(`Saved ${label}`);
+      } else if (target.id === 'btn-group-delete') {
+        const current = getCurrentGroup();
+        if (!current) return;
+        if (!confirm(`Delete group "${current.label || current.id}"?`)) return;
+        await axios.delete(`/api/groups/${current.id}`);
+        currentGroupId = null;
+        await openGroupManager();
+        renderGroups();
+        setGroupStatus('Group deleted');
+      } else if (target.id === 'btn-group-add-selected') {
+        const current = getCurrentGroup();
+        if (!current) return;
+        const ids = getSelectedNodeIds();
+        if (!ids.length) { alert('Please select nodes to add.'); return; }
+        await axios.put(`/api/groups/${current.id}`, { members: Array.from(new Set([...(current.members || []), ...ids])) });
+        await openGroupManager();
+        renderGroups();
+        setGroupStatus(`Added ${ids.length} node(s)`);
+      } else if (target.id === 'btn-group-remove-selected') {
+        const current = getCurrentGroup();
+        if (!current) return;
+        const selected = new Set(getSelectedNodeIds());
+        if (!selected.size) { alert('Please select nodes to remove.'); return; }
+        await axios.put(`/api/groups/${current.id}`, { members: (current.members || []).filter(id => !selected.has(id)) });
+        await openGroupManager();
+        renderGroups();
+        setGroupStatus(`Removed ${selected.size} node(s)`);
+      }
+    });
+    trigger.addEventListener('click', () => { setTimeout(() => { if (root.classList.contains('open')) openGroupManager(); }, 0); });
+  };
+  setupGroupManager();
 
   function fanOffsets(n, base) {
     if (n <= 0) return [];
