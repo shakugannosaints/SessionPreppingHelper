@@ -23,6 +23,7 @@ function mapNode(n) {
   const colors = n.style?.colors || ["#9CA3AF"]; 
   const baseSize = n.style?.size || 40;
   const scale = getSizeScale(n.fields);
+  const zOrder = getNodeZOrder(n.fields);
   const size = baseSize * scale;
   const gradient = colors.length > 1 ? `linear-gradient(${colors.join(',')})` : colors[0];
   const labelField = (n.fields || []).find(f => f.key === '名称') || (n.fields || []).find(f => f.type === 'text');
@@ -57,6 +58,7 @@ function mapNode(n) {
       'color': '#111',
       'text-outline-color': '#fff',
       'text-outline-width': 2,
+      'z-index': zOrder,
     }
   };
 }
@@ -68,6 +70,15 @@ function getSizeScale(fields) {
   const v = parseFloat(String(f.value ?? '1'));
   if (!isFinite(v) || isNaN(v)) return 1;
   return Math.max(0.5, v);
+}
+
+function getNodeZOrder(fields) {
+  const arr = fields || [];
+  const f = arr.find(x => String(x.key || '') === '覆盖顺序');
+  if (!f) return 0;
+  const v = parseFloat(String(f.value ?? '0'));
+  if (!isFinite(v) || isNaN(v)) return 0;
+  return Math.round(v);
 }
 
 function mapLink(l) {
@@ -126,10 +137,12 @@ function renderGraph(nodes, edges) {
   }
 
     // 平移/缩放后，重绘编组框位置（用 rAF 合批，避免频繁重建）
-    cy.on('pan zoom', () => {
+    const scheduleGroupsRender = () => {
       if (rafGroups) return;
       rafGroups = requestAnimationFrame(() => { rafGroups = null; renderGroups(); });
-    });
+    };
+    cy.on('pan zoom', scheduleGroupsRender);
+    cy.on('position drag', 'node', scheduleGroupsRender);
 
     // 选中样式：在选中/取消时切换 CSS 类（用于更强的高亮效果）
     cy.on('select', 'node', (evt) => {
@@ -321,14 +334,19 @@ async function refresh(preservePositions = true) {
 
 function editorHtml(node) {
   const fields = node.fields || [];
-  const editableFields = fields.filter(f => String(f?.key || '') !== '大小倍率');
+  const editableFields = fields.filter(f => !['大小倍率', '覆盖顺序'].includes(String(f?.key || '')));
   const scaleVal = getSizeScale(fields);
+  const zOrderVal = getNodeZOrder(fields);
   return `
     <div>
   <div class="muted" style="margin-bottom:6px;">ID: ${(node.id ?? '').toString().replace(/</g,'&lt;')}</div>
       <div class="field-row field-row-scale">
         <label for="size-scale">大小倍率</label>
         <input id="size-scale" type="number" step="0.1" min="0.5" value="${scaleVal}" />
+      </div>
+      <div class="field-row field-row-scale">
+        <label for="node-z-order">&#35206;&#30422;&#39034;&#24207;</label>
+        <input id="node-z-order" type="number" step="1" value="${zOrderVal}" />
       </div>
       ${editableFields.map((f, i) => `
         <div class="field-row">
@@ -381,6 +399,13 @@ function updateEditor(id) {
       if (idx >= 0) node.fields[idx] = { key: '大小倍率', type: 'number', value: String(sc) };
       else node.fields.unshift({ key: '大小倍率', type: 'number', value: String(sc) });
     }
+    const zOrderInput = el.querySelector('#node-z-order');
+    if (zOrderInput) {
+      const z = Math.round(parseFloat(zOrderInput.value || '0') || 0);
+      const idx = node.fields.findIndex(f => String(f.key) === '覆盖顺序');
+      if (idx >= 0) node.fields[idx] = { key: '覆盖顺序', type: 'number', value: String(z) };
+      else node.fields.unshift({ key: '覆盖顺序', type: 'number', value: String(z) });
+    }
     node.fields.push({ key: '', type: 'text', value: '' });
     updateEditor(id);
   };
@@ -398,6 +423,13 @@ function updateEditor(id) {
       const idx = list.findIndex(f => String(f.key) === '大小倍率');
       if (idx >= 0) list[idx] = { key: '大小倍率', type: 'number', value: String(sc) };
       else list.unshift({ key: '大小倍率', type: 'number', value: String(sc) });
+    }
+    const zOrderInput = el.querySelector('#node-z-order');
+    if (zOrderInput) {
+      const z = Math.round(parseFloat(zOrderInput.value || '0') || 0);
+      const idx = list.findIndex(f => String(f.key) === '覆盖顺序');
+      if (idx >= 0) list[idx] = { key: '覆盖顺序', type: 'number', value: String(z) };
+      else list.unshift({ key: '覆盖顺序', type: 'number', value: String(z) });
     }
     await axios.put(`/api/nodes/${id}`, { fields: list });
     await refresh();
@@ -436,6 +468,13 @@ function updateEditor(id) {
       const idxx = list.findIndex(f => String(f.key) === '大小倍率');
       if (idxx >= 0) list[idxx] = { key: '大小倍率', type: 'number', value: String(sc) };
       else list.unshift({ key: '大小倍率', type: 'number', value: String(sc) });
+    }
+    const zOrderInput = el.querySelector('#node-z-order');
+    if (zOrderInput) {
+      const z = Math.round(parseFloat(zOrderInput.value || '0') || 0);
+      const idxz = list.findIndex(f => String(f.key) === '覆盖顺序');
+      if (idxz >= 0) list[idxz] = { key: '覆盖顺序', type: 'number', value: String(z) };
+      else list.unshift({ key: '覆盖顺序', type: 'number', value: String(z) });
     }
     node.fields = list;
     updateEditor(id);
