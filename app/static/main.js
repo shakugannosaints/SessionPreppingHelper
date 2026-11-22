@@ -364,9 +364,9 @@ function editorHtml(node) {
           <button data-del>删除</button>
         </div>
       `).join('')}
-      <div style="margin:8px 0;">
+      <div style="margin:8px 0; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
         <button id="add-field">+ 添加字段</button>
-        <button id="save-fields">保存</button>
+        <span id="save-status" class="muted" style="font-size:12px;">修改后自动保存</span>
       </div>
       <button id="delete-node" style="color:#b91c1c">删除该节点</button>
     </div>
@@ -378,65 +378,100 @@ function opt(v, cur) { return `<option value="${v}" ${v===cur?'selected':''}>${v
 
 function getNodeById(id) { return (window.__rawNodes || []).find(n => n.id === id); }
 
+// ===== 节点字段自动保存 =====
+// 读取编辑栏当前所有字段（含大小倍率、覆盖顺序）
+function collectEditorFields(el, keepEmpty = false) {
+  const rows = [...el.querySelectorAll('.field-row')];
+  const list = rows.filter(r => r.querySelector('[data-k]')).map(r => ({
+    key: r.querySelector('[data-k]').value.trim(),
+    type: r.querySelector('[data-t]').value,
+    value: r.querySelector('[data-v]').value,
+  })).filter(f => keepEmpty || f.key);
+  const scaleInput = el.querySelector('#size-scale');
+  if (scaleInput) {
+    const sc = Math.max(0.5, parseFloat(scaleInput.value || '1') || 1);
+    const idx = list.findIndex(f => String(f.key) === '大小倍率');
+    if (idx >= 0) list[idx] = { key: '大小倍率', type: 'number', value: String(sc) };
+    else list.unshift({ key: '大小倍率', type: 'number', value: String(sc) });
+  }
+  const zOrderInput = el.querySelector('#node-z-order');
+  if (zOrderInput) {
+    const z = Math.round(parseFloat(zOrderInput.value || '0') || 0);
+    const idx = list.findIndex(f => String(f.key) === '覆盖顺序');
+    if (idx >= 0) list[idx] = { key: '覆盖顺序', type: 'number', value: String(z) };
+    else list.unshift({ key: '覆盖顺序', type: 'number', value: String(z) });
+  }
+  return list;
+}
+
+let fieldSaveTimer = null;
+let fieldSaveGeneration = 0;
+
+function setSaveStatus(text, isError) {
+  const st = document.querySelector('#node-editor #save-status');
+  if (!st) return;
+  st.textContent = text;
+  st.style.color = isError ? 'var(--color-text-danger, #b91c1c)' : '';
+}
+
+// 提交字段到后端并刷新图谱；rebuildEditor=false 以避免输入时编辑器重建导致失焦
+async function persistEditorFields(id, el, rebuildEditor = false) {
+  const list = collectEditorFields(el);
+  const gen = ++fieldSaveGeneration;
+  setSaveStatus('保存中…');
+  try {
+    await axios.put(`/api/nodes/${id}`, { fields: list });
+    await refresh();
+    if (gen !== fieldSaveGeneration) return;
+    if (rebuildEditor) {
+      updateEditor(id);
+      return;
+    }
+    selectedNode = cy && cy.getElementById(id);
+    if (selectedNode && selectedNode.nonempty && selectedNode.nonempty()) selectedNode.select();
+    setSaveStatus('已自动保存');
+  } catch (e) {
+    if (gen === fieldSaveGeneration) setSaveStatus('保存失败', true);
+    console.error(e);
+  }
+}
+
+// 输入防抖：停止输入 500ms 后自动提交
+function scheduleFieldSave(id, el) {
+  if (fieldSaveTimer) clearTimeout(fieldSaveTimer);
+  setSaveStatus('正在输入…');
+  fieldSaveTimer = setTimeout(() => {
+    fieldSaveTimer = null;
+    persistEditorFields(id, el, false);
+  }, 500);
+}
+
 function updateEditor(id) {
   const node = getNodeById(id);
   const el = document.getElementById('node-editor');
   if (!node) { el.innerHTML = '<div class="hint">未找到节点。</div>'; return; }
+  // 切换节点前先冲刷上一个节点尚未到期的自动保存，避免丢改动
+  if (fieldSaveTimer) {
+    clearTimeout(fieldSaveTimer);
+    const pendingId = el.dataset.nodeId;
+    const pendingEl = el;
+    fieldSaveTimer = null;
+    if (pendingId && pendingId !== id) axios.put(`/api/nodes/${pendingId}`, { fields: collectEditorFields(pendingEl) }).catch(() => {});
+  }
+  el.dataset.nodeId = id;
   el.innerHTML = editorHtml(node);
-  el.querySelector('#add-field').onclick = () => {
-    // 读取当前输入，避免内容丢失
-    const rows = [...el.querySelectorAll('.field-row')];
-    node.fields = rows.filter(r => r.querySelector('[data-k]')).map(r => ({
-      key: r.querySelector('[data-k]').value,
-      type: r.querySelector('[data-t]').value,
-      value: r.querySelector('[data-v]').value,
-    }));
-    // 同步大小倍率到字段集中
-    const scaleInput = el.querySelector('#size-scale');
-    if (scaleInput) {
-      const sc = Math.max(0.5, parseFloat(scaleInput.value || '1') || 1);
-      const idx = node.fields.findIndex(f => String(f.key) === '大小倍率');
-      if (idx >= 0) node.fields[idx] = { key: '大小倍率', type: 'number', value: String(sc) };
-      else node.fields.unshift({ key: '大小倍率', type: 'number', value: String(sc) });
-    }
-    const zOrderInput = el.querySelector('#node-z-order');
-    if (zOrderInput) {
-      const z = Math.round(parseFloat(zOrderInput.value || '0') || 0);
-      const idx = node.fields.findIndex(f => String(f.key) === '覆盖顺序');
-      if (idx >= 0) node.fields[idx] = { key: '覆盖顺序', type: 'number', value: String(z) };
-      else node.fields.unshift({ key: '覆盖顺序', type: 'number', value: String(z) });
-    }
-    node.fields.push({ key: '', type: 'text', value: '' });
-    updateEditor(id);
-  };
-  el.querySelector('#save-fields').onclick = async () => {
-    const rows = [...el.querySelectorAll('.field-row')];
-    const list = rows.filter(r => r.querySelector('[data-k]')).map(r => ({
-      key: r.querySelector('[data-k]').value.trim(),
-      type: r.querySelector('[data-t]').value,
-      value: r.querySelector('[data-v]').value,
-    })).filter(f => f.key);
-    // 读取并合并大小倍率
-    const scaleInput = el.querySelector('#size-scale');
-    if (scaleInput) {
-      const sc = Math.max(0.5, parseFloat(scaleInput.value || '1') || 1);
-      const idx = list.findIndex(f => String(f.key) === '大小倍率');
-      if (idx >= 0) list[idx] = { key: '大小倍率', type: 'number', value: String(sc) };
-      else list.unshift({ key: '大小倍率', type: 'number', value: String(sc) });
-    }
-    const zOrderInput = el.querySelector('#node-z-order');
-    if (zOrderInput) {
-      const z = Math.round(parseFloat(zOrderInput.value || '0') || 0);
-      const idx = list.findIndex(f => String(f.key) === '覆盖顺序');
-      if (idx >= 0) list[idx] = { key: '覆盖顺序', type: 'number', value: String(z) };
-      else list.unshift({ key: '覆盖顺序', type: 'number', value: String(z) });
-    }
-    await axios.put(`/api/nodes/${id}`, { fields: list });
-    await refresh();
-    selectedNode = cy.getElementById(id);
-    selectedNode ? selectedNode.select() : null;
-    updateEditor(id);
-  };
+
+  // 字段名、字段值、大小倍率、覆盖顺序：输入防抖自动保存
+  el.querySelectorAll('[data-k], [data-v], #size-scale, #node-z-order').forEach(inp => {
+    inp.addEventListener('input', () => scheduleFieldSave(id, el));
+  });
+  // 字段类型变更会改变值控件的形态（textarea <-> input），需保存后重建编辑栏
+  el.querySelectorAll('[data-t]').forEach(sel => {
+    sel.addEventListener('change', () => {
+      if (fieldSaveTimer) { clearTimeout(fieldSaveTimer); fieldSaveTimer = null; }
+      persistEditorFields(id, el, true);
+    });
+  });
 
   // 自动高度：对所有 textarea 进行自适应
   el.querySelectorAll('textarea[data-v]').forEach(t => {
@@ -444,39 +479,33 @@ function updateEditor(id) {
     t.addEventListener('input', auto);
     auto();
   });
+  el.querySelector('#add-field').onclick = async () => {
+    const n = getNodeById(id) || node;
+    const list = collectEditorFields(el);
+    list.push({ key: '', type: 'text', value: '' });
+    fieldSaveGeneration++;
+    if (fieldSaveTimer) { clearTimeout(fieldSaveTimer); fieldSaveTimer = null; }
+    await axios.put(`/api/nodes/${id}`, { fields: list });
+    await refresh();
+    updateEditor(id);
+  };
   el.querySelector('#delete-node').onclick = async () => {
     if (!confirm('确认删除该节点？')) return;
+    if (fieldSaveTimer) { clearTimeout(fieldSaveTimer); fieldSaveTimer = null; }
     await axios.delete(`/api/nodes/${id}`);
     selectedNode = null;
-    document.getElementById('node-editor').innerHTML = '<div class="hint">选择图中的一个节点以编辑字段。</div>';
+    const editor = document.getElementById('node-editor');
+    editor.dataset.nodeId = '';
+    editor.innerHTML = '<div class="hint">选择图中的一个节点以编辑字段。</div>';
     await refresh();
-  }
-  el.querySelectorAll('[data-del]').forEach((btn, idx) => btn.onclick = () => {
-    // 删除前先取当前所有值，避免丢失未保存的编辑内容
-    const rows = [...el.querySelectorAll('.field-row')];
-    const list = rows.filter(r => r.querySelector('[data-k]')).map(r => ({
-      key: r.querySelector('[data-k]').value,
-      type: r.querySelector('[data-t]').value,
-      value: r.querySelector('[data-v]').value,
-    }));
-    // 先删除可编辑字段中的目标项
+  };
+  el.querySelectorAll('[data-del]').forEach((btn, idx) => btn.onclick = async () => {
+    const list = collectEditorFields(el, true);
     list.splice(idx, 1);
-    // 同步大小倍率
-    const scaleInput = el.querySelector('#size-scale');
-    if (scaleInput) {
-      const sc = Math.max(0.5, parseFloat(scaleInput.value || '1') || 1);
-      const idxx = list.findIndex(f => String(f.key) === '大小倍率');
-      if (idxx >= 0) list[idxx] = { key: '大小倍率', type: 'number', value: String(sc) };
-      else list.unshift({ key: '大小倍率', type: 'number', value: String(sc) });
-    }
-    const zOrderInput = el.querySelector('#node-z-order');
-    if (zOrderInput) {
-      const z = Math.round(parseFloat(zOrderInput.value || '0') || 0);
-      const idxz = list.findIndex(f => String(f.key) === '覆盖顺序');
-      if (idxz >= 0) list[idxz] = { key: '覆盖顺序', type: 'number', value: String(z) };
-      else list.unshift({ key: '覆盖顺序', type: 'number', value: String(z) });
-    }
-    node.fields = list;
+    fieldSaveGeneration++;
+    if (fieldSaveTimer) { clearTimeout(fieldSaveTimer); fieldSaveTimer = null; }
+    await axios.put(`/api/nodes/${id}`, { fields: list });
+    await refresh();
     updateEditor(id);
   });
 }
