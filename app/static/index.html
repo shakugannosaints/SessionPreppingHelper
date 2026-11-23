@@ -11,6 +11,9 @@
   <script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
 </head>
 <body>
+  <script>
+    try { if (localStorage.getItem('sph.theme') === 'dark') document.documentElement.classList.add('dark'); } catch {}
+  </script>
   <header>
     <h1>备团助手</h1>
     <div class="actions">
@@ -37,6 +40,7 @@
         </label>
         <button id="btn-undo" title="撤销 (Ctrl+Z)">撤销</button>
         <button id="btn-redo" title="重做 (Ctrl+Y)">重做</button>
+        <button id="btn-theme-toggle" type="button" title="切换夜间模式">夜间</button>
         <button id="btn-help-toggle" title="操作帮助 (H / ?)">操作帮助</button>
 
         <div class="dropdown" id="dd-auto">
@@ -110,6 +114,24 @@
     <section id="graph"></section>
   </main>
 
+  <div id="group-view-panel" class="group-view-panel" aria-label="图层管理">
+    <div class="gvp-head">
+      <span class="gvp-title">◉ 图层</span>
+      <button type="button" id="gvp-toggle" class="gvp-toggle" title="收起 / 展开">−</button>
+    </div>
+    <div id="gvp-body" class="gvp-body">
+      <div class="gvp-hint">单击切换 · 右键编辑 · 拖动图层进文件夹归类</div>
+      <div id="gvp-list" class="gvp-list"></div>
+      <div class="gvp-actions">
+        <button type="button" id="gvp-new-layer" title="以当前选中节点新建图层">+ 图层</button>
+        <button type="button" id="gvp-new-folder" title="新建文件夹归类图层">+ 文件夹</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="layer-context-menu" class="layer-context-menu" role="menu" hidden></div>
+  <div id="node-context-menu" class="layer-context-menu node-context-menu" role="menu" hidden></div>
+
   <aside id="help-panel" class="help-panel" aria-hidden="true">
     <div class="help-head">
       <h2>操作帮助</h2>
@@ -152,6 +174,19 @@
         <li>可设置编组颜色和透明度</li>
         <li>拖动编组标签可整体移动该编组内节点</li>
         <li>在“编组 ▾”菜单中可编辑成员和删除编组</li>
+      </ul>
+
+      <h3>图层（独立排版）</h3>
+      <ul class="help-list">
+        <li>右下角“图层”选窗：单选切换图层或全局浏览，每个图层有自己独立的位置排版</li>
+        <li>在图层里拖动节点，只写入该图层；在全局拖动，只写全局——两者互不打乱</li>
+        <li>节点内容（字段、连线）全局共享，只有位置是各图层独立的</li>
+        <li>在当前图层里点“新建节点”或“用模板创建”，节点会直接进入该图层；修改字段、连线仍与全局同步</li>
+        <li>右键画布上的节点：加入已有图层、复制节点、删除节点</li>
+        <li>选中节点后点“+ 图层”以其当前位置新建；右键图层/文件夹可重命名、复制、解散、删除、增删成员</li>
+        <li>直接把图层拖到文件夹上即可归类；拖回“全局浏览”移出文件夹</li>
+        <li>“全局浏览”右侧的“编组框”开关可显示/隐藏画布上的彩色编组框与角标</li>
+        <li>删除图层只删排版，不会删除节点本身</li>
       </ul>
 
       <h3>其他操作</h3>

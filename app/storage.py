@@ -19,6 +19,7 @@ except Exception:  # pragma: no cover
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), "data.json")
 TEMPLATES_PATH = os.path.join(os.path.dirname(__file__), "templates.json")
+LAYERS_PATH = os.path.join(os.path.dirname(__file__), "layers.json")
 
 # In-memory cache and debounced flush
 _CACHE: Dict[str, Any] | None = None
@@ -199,6 +200,11 @@ def default_data() -> Dict[str, Any]:
     return {"nodes": [], "links": [], "suppressedAutoPairs": [], "autoEdgeOverrides": {}}
 
 
+def default_layers() -> Dict[str, Any]:
+    # 图层文件：只存"位置排版"与引用，节点内容仍以 data.json 为唯一来源
+    return {"layers": []}
+
+
 def default_templates() -> Dict[str, Any]:
     return {
         "NPC": [
@@ -239,6 +245,20 @@ def read_templates() -> Dict[str, Any]:
 def write_templates(data: Dict[str, Any]) -> None:
     # Templates are less frequently modified; write-through is acceptable
     _save(TEMPLATES_PATH, data)
+
+
+def read_layers() -> Dict[str, Any]:
+    # 图层文件不参与主数据的防抖缓存：位置排版改动需立即落盘
+    data = _load(LAYERS_PATH, default_layers())
+    if not isinstance(data, dict):
+        data = default_layers()
+    if not isinstance(data.get("layers"), list):
+        data["layers"] = []
+    return data
+
+
+def write_layers(data: Dict[str, Any]) -> None:
+    _save(LAYERS_PATH, data)
 
 
 def new_id() -> str:
