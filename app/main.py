@@ -7,7 +7,10 @@ from copy import deepcopy
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
-from .storage import read_all, write_all, read_templates, write_templates, new_id
+from .storage import (
+    read_all, write_all, read_templates, write_templates, new_id,
+    read_layers, write_layers,
+)
 from .utils import compute_auto_links, derive_node_style
 
 
@@ -40,6 +43,24 @@ def create_app() -> Flask:
     def get_data():
         data = read_all()
         nodes = data.get("nodes", [])
+        # 图层视图：只返回该图层成员，并用图层专属位置覆盖节点位置
+        layer_id = request.args.get("layer")
+        if layer_id:
+            layer_doc = read_layers()
+            layer = next((l for l in layer_doc.get("layers", []) if l.get("id") == layer_id), None)
+            if layer:
+                member_ids = set(layer.get("members", []) or [])
+                positions = layer.get("positions", {}) or {}
+                filtered_nodes = []
+                for n in nodes:
+                    if n.get("id") not in member_ids:
+                        continue
+                    nn = deepcopy(n)
+                    pos = positions.get(n.get("id"))
+                    if isinstance(pos, dict) and isinstance(pos.get("x"), (int, float)) and isinstance(pos.get("y"), (int, float)):
+                        nn["position"] = {"x": pos["x"], "y": pos["y"]}
+                    filtered_nodes.append(nn)
+                nodes = filtered_nodes
         # add computed styles
         for n in nodes:
             n["style"] = derive_node_style(n)
@@ -92,6 +113,19 @@ def create_app() -> Flask:
         }
         data.setdefault("nodes", []).append(node)
         write_with_undo(data, prev)
+        # 图层视图下新建：同时写入该图层的成员与独立位置
+        layer_id = body.get("layerId")
+        if isinstance(layer_id, str):
+            doc = read_layers()
+            layer = next((l for l in doc.get("layers", []) if l.get("id") == layer_id and l.get("kind") == "layer"), None)
+            if layer:
+                members = layer.setdefault("members", [])
+                if node["id"] not in members:
+                    members.append(node["id"])
+                p = node.get("position")
+                if isinstance(p, dict) and isinstance(p.get("x"), (int, float)) and isinstance(p.get("y"), (int, float)):
+                    layer.setdefault("positions", {})[node["id"]] = {"x": p["x"], "y": p["y"]}
+                write_layers(doc)
         node["style"] = derive_node_style(node)
         return jsonify(node)
 
@@ -154,6 +188,18 @@ def create_app() -> Flask:
         if len(nodes) == before:
             return jsonify({"error": "not found"}), 404
         write_with_undo(data, prev)
+        # 同步清理所有图层的成员与排版引用，避免留下悬空节点
+        doc = read_layers()
+        changed = False
+        for layer in doc.get("layers", []):
+            if node_id in (layer.get("members") or []):
+                layer["members"] = [m for m in layer.get("members", []) if m != node_id]
+                changed = True
+            if node_id in (layer.get("positions") or {}):
+                layer.get("positions", {}).pop(node_id, None)
+                changed = True
+        if changed:
+            write_layers(doc)
         return jsonify({"ok": True})
 
     # manual links
@@ -400,6 +446,13 @@ def create_app() -> Flask:
             "groups": [],
         }
         write_with_undo(new_data, prev)
+        # 画布清空后图层定义保留，但成员与排版引用需清空
+        doc = read_layers()
+        for layer in doc.get("layers", []):
+            if layer.get("kind") == "layer":
+                layer["members"] = []
+                layer["positions"] = {}
+        write_layers(doc)
         return jsonify({"ok": True})
 
     # Groups CRUD
@@ -466,6 +519,264 @@ def create_app() -> Flask:
             return jsonify({"error": "not found"}), 404
         write_with_undo(data, prev)
         return jsonify({"ok": True})
+
+    # ===== 图层（PS 式独立排版）=====
+    # layers.json 只存图层定义与位置排版；节点字段/连线仍以 data.json 为唯一来源。
+
+    def _is_layer_descendant(layers: List[Dict[str, Any]], child_id: str, ancestor_id: str) -> bool:
+        """判断 child_id 是否是 ancestor_id 的后代（含自身），用于阻止成环。"""
+        seen = set()
+        cur: Any = child_id
+        while isinstance(cur, str) and cur not in seen:
+            if cur == ancestor_id:
+                return True
+            seen.add(cur)
+            node = next((x for x in layers if x.get("id") == cur), None)
+            if not node:
+                return False
+            cur = node.get("parentId")
+        return False
+
+    def _clone_layer_tree(
+        layers: List[Dict[str, Any]], source_id: str, new_parent_id: Any,
+        created: List[str], visited: set,
+    ) -> Any:
+        if source_id in visited:
+            return None
+        visited.add(source_id)
+        src = next((x for x in layers if x.get("id") == source_id), None)
+        if not src:
+            return None
+        clone = deepcopy(src)
+        clone["id"] = new_id()
+        base_label = src.get("label") or ("图层" if src.get("kind") == "layer" else "文件夹")
+        clone["label"] = f"{base_label} 副本"
+        clone["parentId"] = new_parent_id
+        layers.append(clone)
+        created.append(clone["id"])
+        if src.get("kind") == "folder":
+            child_ids = [
+                x.get("id") for x in layers
+                if x.get("parentId") == source_id
+                and x.get("id") != source_id
+                and isinstance(x.get("id"), str)
+            ]
+            for child_id in child_ids:
+                _clone_layer_tree(layers, child_id, clone["id"], created, visited)
+        return clone
+
+    @app.get("/api/layers")
+    def list_layers():
+        return jsonify(read_layers().get("layers", []))
+
+    @app.post("/api/layers")
+    def create_layer():
+        body = request.get_json(force=True, silent=True) or {}
+        kind = body.get("kind") if body.get("kind") in ("layer", "folder") else "layer"
+        label = str(body.get("label") or ("图层" if kind == "layer" else "文件夹"))
+        parent_id = body.get("parentId")
+        if not isinstance(parent_id, str):
+            parent_id = None
+        members = [m for m in (body.get("members") or []) if isinstance(m, str)]
+        color = str(body.get("color") or "#3b82f6")
+        opacity = body.get("opacity")
+        try:
+            op = float(opacity) if opacity is not None else 0.08
+        except Exception:
+            op = 0.08
+        doc = read_layers()
+        lid = new_id()
+        positions: Dict[str, Any] = {}
+        # snapshot: 以成员当前（全局）位置作为该图层初始排版
+        if kind == "layer" and body.get("snapshot"):
+            node_pos = {n.get("id"): n.get("position") for n in read_all().get("nodes", [])}
+            for mid in members:
+                p = node_pos.get(mid)
+                if isinstance(p, dict) and isinstance(p.get("x"), (int, float)) and isinstance(p.get("y"), (int, float)):
+                    positions[mid] = {"x": p["x"], "y": p["y"]}
+        layer = {
+            "id": lid, "label": label, "kind": kind, "parentId": parent_id,
+            "color": color, "opacity": op,
+            "members": members if kind == "layer" else [],
+            "positions": positions if kind == "layer" else {},
+        }
+        doc.setdefault("layers", []).append(layer)
+        write_layers(doc)
+        return jsonify(layer)
+
+    @app.put("/api/layers/<lid>")
+    def update_layer(lid: str):
+        body = request.get_json(force=True, silent=True) or {}
+        doc = read_layers()
+        layers: List[Dict[str, Any]] = doc.setdefault("layers", [])
+        for l in layers:
+            if l.get("id") == lid:
+                if "label" in body:
+                    l["label"] = str(body.get("label") or "")
+                if "color" in body:
+                    l["color"] = str(body.get("color") or "#3b82f6")
+                if "opacity" in body:
+                    try:
+                        val = body.get("opacity")
+                        if val is not None:
+                            l["opacity"] = float(val)
+                    except Exception:
+                        pass
+                if "parentId" in body:
+                    pid = body.get("parentId")
+                    # 只允许 folder 作为父级，且不能把图层挂到自己或自己的后代上（仅做一层校验）
+                    if isinstance(pid, str) and pid != lid:
+                        target = next((x for x in layers if x.get("id") == pid and x.get("kind") == "folder"), None)
+                        # 目标文件夹不能是自身或自身的后代，否则会形成循环嵌套
+                        if target and not _is_layer_descendant(layers, pid, lid):
+                            l["parentId"] = pid
+                        else:
+                            l["parentId"] = None
+                    else:
+                        l["parentId"] = None
+                if "members" in body and isinstance(body.get("members"), list) and l.get("kind") == "layer":
+                    new_members = [m for m in body["members"] if isinstance(m, str)]
+                    old_members = set(l.get("members", []) or [])
+                    l["members"] = new_members
+                    # 移除成员时清理其位置；新增成员用当前全局位置初始化
+                    positions = l.setdefault("positions", {})
+                    for mid in list(positions.keys()):
+                        if mid not in new_members:
+                            positions.pop(mid, None)
+                    node_pos = {n.get("id"): n.get("position") for n in read_all().get("nodes", [])}
+                    for mid in new_members:
+                        if mid in old_members or mid in positions:
+                            continue
+                        p = node_pos.get(mid)
+                        if isinstance(p, dict) and isinstance(p.get("x"), (int, float)) and isinstance(p.get("y"), (int, float)):
+                            positions[mid] = {"x": p["x"], "y": p["y"]}
+                write_layers(doc)
+                return jsonify(l)
+        return jsonify({"error": "not found"}), 404
+
+    @app.delete("/api/layers/<lid>")
+    def delete_layer(lid: str):
+        doc = read_layers()
+        layers: List[Dict[str, Any]] = doc.setdefault("layers", [])
+        target = next((l for l in layers if l.get("id") == lid), None)
+        if not target:
+            return jsonify({"error": "not found"}), 404
+        # 删除文件夹时，其子图层提升为顶层（不删除子图层）
+        for l in layers:
+            if l.get("parentId") == lid:
+                l["parentId"] = None
+        doc["layers"] = [l for l in layers if l.get("id") != lid]
+        write_layers(doc)
+        return jsonify({"ok": True})
+
+    @app.post("/api/layers/<lid>/duplicate")
+    def duplicate_layer(lid: str):
+        """复制图层（连同独立排版）；复制文件夹时连同其内部子项一起复制。"""
+        doc = read_layers()
+        layers: List[Dict[str, Any]] = doc.setdefault("layers", [])
+        src = next((l for l in layers if l.get("id") == lid), None)
+        if not src:
+            return jsonify({"error": "not found"}), 404
+        created: List[str] = []
+        clone = _clone_layer_tree(layers, lid, src.get("parentId"), created, set())
+        write_layers(doc)
+        return jsonify({"ok": True, "id": clone["id"] if clone else None, "created": created})
+
+    @app.post("/api/layers/<lid>/dissolve")
+    def dissolve_layer(lid: str):
+        """解散文件夹：子项提升到同一层；解散图层：清空成员，保留图层定义。"""
+        doc = read_layers()
+        layers: List[Dict[str, Any]] = doc.setdefault("layers", [])
+        target = next((l for l in layers if l.get("id") == lid), None)
+        if not target:
+            return jsonify({"error": "not found"}), 404
+        if target.get("kind") == "folder":
+            parent_id = target.get("parentId")
+            for l in layers:
+                if l.get("parentId") == lid and l.get("id") != lid:
+                    l["parentId"] = parent_id
+            doc["layers"] = [l for l in layers if l.get("id") != lid]
+        else:
+            target["members"] = []
+            target["positions"] = {}
+        write_layers(doc)
+        return jsonify({"ok": True})
+
+    @app.post("/api/layers/<lid>/delete-tree")
+    def delete_layer_tree(lid: str):
+        """删除文件夹及其全部后代；对普通图层等同于删除图层。"""
+        doc = read_layers()
+        layers: List[Dict[str, Any]] = doc.setdefault("layers", [])
+        if not any(l.get("id") == lid for l in layers):
+            return jsonify({"error": "not found"}), 404
+        doomed = {lid}
+        changed = True
+        while changed:
+            changed = False
+            for l in layers:
+                pid = l.get("parentId")
+                if isinstance(pid, str) and pid in doomed and l.get("id") not in doomed:
+                    doomed.add(l.get("id"))
+                    changed = True
+        doc["layers"] = [l for l in layers if l.get("id") not in doomed]
+        write_layers(doc)
+        return jsonify({"ok": True, "deleted": list(doomed)})
+
+    @app.post("/api/layers/<lid>/positions")
+    def save_layer_positions(lid: str):
+        body = request.get_json(force=True, silent=True) or {}
+        items: List[Dict[str, Any]] = []
+        if isinstance(body, list):
+            items = [x for x in body if isinstance(x, dict) and isinstance(x.get("id"), str) and isinstance(x.get("position"), dict)]
+        elif isinstance(body, dict):
+            for k, v in body.items():
+                if isinstance(k, str) and isinstance(v, dict):
+                    items.append({"id": k, "position": v})
+        if not items:
+            return jsonify({"error": "invalid body"}), 400
+        doc = read_layers()
+        layer = next((l for l in doc.get("layers", []) if l.get("id") == lid and l.get("kind") == "layer"), None)
+        if not layer:
+            return jsonify({"error": "not found"}), 404
+        positions = layer.setdefault("positions", {})
+        updated = 0
+        for x in items:
+            p = x["position"]
+            if isinstance(p.get("x"), (int, float)) and isinstance(p.get("y"), (int, float)):
+                positions[x["id"]] = {"x": p["x"], "y": p["y"]}
+                updated += 1
+        write_layers(doc)
+        return jsonify({"ok": True, "updated": updated})
+
+    # 从现有编组迁移：每个编组的成员 + 当前位置生成一个图层
+    @app.post("/api/layers/migrate-from-groups")
+    def migrate_layers_from_groups():
+        doc = read_layers()
+        layers = doc.setdefault("layers", [])
+        data = read_all()
+        node_pos = {n.get("id"): n.get("position") for n in data.get("nodes", [])}
+        created = []
+        for g in data.get("groups", []) or []:
+            gid = g.get("id")
+            members = [m for m in (g.get("members") or []) if isinstance(m, str)]
+            if any(l.get("sourceGroup") == gid for l in layers):
+                continue  # 已迁移过
+            positions = {}
+            for mid in members:
+                p = node_pos.get(mid)
+                if isinstance(p, dict) and isinstance(p.get("x"), (int, float)) and isinstance(p.get("y"), (int, float)):
+                    positions[mid] = {"x": p["x"], "y": p["y"]}
+            layer = {
+                "id": new_id(), "label": str(g.get("label") or "编组"), "kind": "layer",
+                "parentId": None, "color": str(g.get("color") or "#3b82f6"),
+                "opacity": float(g.get("opacity")) if isinstance(g.get("opacity"), (int, float)) else 0.08,
+                "members": members, "positions": positions, "sourceGroup": gid,
+            }
+            layers.append(layer)
+            created.append(layer)
+        if created:
+            write_layers(doc)
+        return jsonify({"ok": True, "created": len(created), "layers": created})
 
     return app
 
