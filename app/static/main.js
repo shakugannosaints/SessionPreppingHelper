@@ -10,6 +10,61 @@ const groupDomCache = new Map();
 const groupBadgeCache = new Map();
 let groupOverlaySvg = null;
 let rafGroups = null;
+// 布局尺寸变化后让画布重算尺寸（工具栏换行、拖动侧栏、窗口缩放）
+let rafGraphResize = null;
+function scheduleGraphResize() {
+  if (rafGraphResize) return;
+  rafGraphResize = requestAnimationFrame(() => {
+    rafGraphResize = null;
+    if (!cy) return;
+    try { cy.resize(); } catch {}
+    try { renderGroups(); } catch {}
+  });
+}
+
+function applyGraphTheme() {
+  if (!cy) return;
+  const p = themePalette();
+  try {
+    cy.style().selector('node').style({ 'border-color': p.nodeBorder }).update();
+    cy.style().selector('edge').style({
+      'line-color': p.edge,
+      'target-arrow-color': p.edge,
+      'color': p.edgeText,
+      'text-background-color': p.labelBg,
+    }).update();
+    cy.style().selector('edge.dual').style({ 'source-arrow-color': p.edge }).update();
+    cy.nodes().forEach(n => {
+      n.style('color', p.nodeText);
+      n.style('text-outline-color', p.nodeOutline);
+      const base = n.data('baseSelColor');
+      if (base) n.data('selColor', isDarkTheme() ? '#38bdf8' : base);
+    });
+  } catch {}
+}
+
+function applyTheme(dark, repaintGraph = true) {
+  document.documentElement.classList.toggle('dark', !!dark);
+  try { localStorage.setItem(THEME_STORAGE_KEY, dark ? 'dark' : 'light'); } catch {}
+  const btn = document.getElementById('btn-theme-toggle');
+  if (btn) {
+    btn.textContent = dark ? '日间' : '夜间';
+    btn.title = dark ? '切换到日间模式' : '切换到夜间模式';
+  }
+  if (repaintGraph) {
+    applyGraphTheme();
+    try { renderGroups(); } catch {}
+  }
+}
+
+function setupThemeToggle() {
+  const btn = document.getElementById('btn-theme-toggle');
+  if (btn && !btn.dataset.bound) {
+    btn.dataset.bound = '1';
+    btn.onclick = () => applyTheme(!isDarkTheme(), true);
+  }
+}
+
 // debounced saver for node positions after drag
 let dragSaveTimer = null;
 let dragSaveIds = new Set();
@@ -18,6 +73,29 @@ let focusNodeId = null;
 let lastTapNodeId = null;
 let lastTapTime = 0;
 const DOUBLE_TAP_MS = 350;
+// 图层视图状态：null = 全局浏览；否则为当前图层 id（节点内容共享，位置独立）
+let activeLayerId = null;
+let cachedLayers = [];
+// 图层面板右键菜单 / 拖拽归类状态
+let contextTargetId = null;
+let dragSourceId = null;
+// 编组彩色框显示开关（默认关闭，状态本地保存）
+const GROUP_BOXES_STORAGE_KEY = 'sph.showGroupBoxes';
+let showGroupBoxes = (() => {
+  try { return localStorage.getItem(GROUP_BOXES_STORAGE_KEY) === '1'; } catch { return false; }
+})();
+
+// 夜间模式：状态本地保存，画布配色随主题切换
+const THEME_STORAGE_KEY = 'sph.theme';
+function isDarkTheme() {
+  return document.documentElement.classList.contains('dark');
+}
+function themePalette() {
+  return isDarkTheme()
+    ? { graphBg: '#0b1220', nodeBorder: '#0f172a', nodeText: '#f8fafc', nodeOutline: '#0b1220', edge: '#64748b', edgeText: '#cbd5e1', labelBg: '#1e293b', groupLabelBg: '#1e293b', groupLabelBorder: '#334155', groupLabelText: '#e2e8f0' }
+    : { graphBg: '#ffffff', nodeBorder: '#ffffff', nodeText: '#111111', nodeOutline: '#ffffff', edge: '#CBD5E1', edgeText: '#334155', labelBg: '#ffffff', groupLabelBg: '#ffffff', groupLabelBorder: '#e5e7eb', groupLabelText: '#1f2937' };
+}
+function exportBg() { return themePalette().graphBg; }
 
 function mapNode(n) {
   const colors = n.style?.colors || ["#9CA3AF"]; 
@@ -43,9 +121,11 @@ function mapNode(n) {
       return `#${toHex2(r)}${toHex2(g)}${toHex2(b)}`;
     } catch { return '#3b82f6'; }
   };
-  const selColor = invertHex(baseColor);
+  const baseSelColor = invertHex(baseColor);
+  const selColor = isDarkTheme() ? '#38bdf8' : baseSelColor;
+  const p = themePalette();
   return {
-    data: { id: n.id, label, selColor },
+    data: { id: n.id, label, selColor, baseSelColor },
     position: n.position || undefined,
     style: {
       'background-color': baseColor,
@@ -55,8 +135,8 @@ function mapNode(n) {
       'text-valign': 'center',
       'text-halign': 'center',
       'font-size': Math.max(6, 12 * scale),
-      'color': '#111',
-      'text-outline-color': '#fff',
+      'color': p.nodeText,
+      'text-outline-color': p.nodeOutline,
       'text-outline-width': 2,
       'z-index': zOrder,
     }
@@ -91,10 +171,17 @@ function mapLink(l) {
 }
 
 async function loadData() {
-  // 总是获取完整数据，自动连线筛选在前端完成
-  const { data } = await axios.get('/api/data');
+  // 图层视图：按图层取节点（位置由图层文件覆盖）；全局：取全部节点（主文件位置）
+  const params = activeLayerId ? { params: { layer: activeLayerId } } : {};
+  const { data } = await axios.get('/api/data', params);
   const nodes = (data.nodes || []).map(mapNode);
-  const edges = [...(data.links || []), ...(data.autoLinks || [])].map(mapLink);
+  const nodeIds = new Set((data.nodes || []).map(n => n.id));
+  let edgeDefs = [...(data.links || []), ...(data.autoLinks || [])];
+  // 图层视图下只保留两端都在该图层内的连线，避免悬空边导致 cytoscape 报错
+  if (activeLayerId) {
+    edgeDefs = edgeDefs.filter(l => nodeIds.has(l.source) && nodeIds.has(l.target));
+  }
+  const edges = edgeDefs.map(mapLink);
   return { nodes, edges, rawNodes: data.nodes };
 }
 
@@ -106,8 +193,14 @@ function renderGraph(nodes, edges) {
     el.id = 'cy';
     container.appendChild(el);
   }
+  // 在捕获阶段阻止画布区域的浏览器原生右键菜单，避免与节点/图层右键菜单同时弹出
+  if (container && !container.dataset.nativeCtxBlocked) {
+    container.dataset.nativeCtxBlocked = '1';
+    container.addEventListener('contextmenu', (ev) => ev.preventDefault(), true);
+  }
   // Preserve viewport (pan/zoom) across re-renders
   const prev = cy ? { pan: cy.pan(), zoom: cy.zoom() } : null;
+  const p = themePalette();
   cy = cytoscape({
     container: el,
     elements: { nodes, edges },
@@ -117,16 +210,16 @@ function renderGraph(nodes, edges) {
   minZoom: 0.02,
   maxZoom: 4,
   style: [
-  { selector: 'node', style: { 'background-color': '#9CA3AF', 'border-width': 2, 'border-color': '#fff' } },
+  { selector: 'node', style: { 'background-color': '#9CA3AF', 'border-width': 2, 'border-color': p.nodeBorder } },
   { selector: 'node:selected', style: { 'border-color': 'data(selColor)', 'border-width': 4, 'shadow-blur': 12, 'shadow-color': 'data(selColor)', 'shadow-opacity': 0.8, 'shadow-offset-x': 0, 'shadow-offset-y': 0 } },
-  { selector: 'edge', style: { 'curve-style': 'unbundled-bezier', 'edge-distances': 'node-position', 'line-color': '#CBD5E1', 'width': 2, 'label': 'data(label)', 'font-size': 10, 'text-background-opacity': 1, 'text-background-color': '#fff', 'text-background-padding': 2, 'target-arrow-shape': 'triangle', 'target-arrow-color': '#CBD5E1', 'control-point-distance': 'data(cpd)', 'control-point-weight': 0.5, 'text-rotation': 'autorotate' } },
+  { selector: 'edge', style: { 'curve-style': 'unbundled-bezier', 'edge-distances': 'node-position', 'line-color': p.edge, 'color': p.edgeText, 'width': 2, 'label': 'data(label)', 'font-size': 10, 'text-background-opacity': 1, 'text-background-color': p.labelBg, 'text-background-padding': 2, 'target-arrow-shape': 'triangle', 'target-arrow-color': p.edge, 'control-point-distance': 'data(cpd)', 'control-point-weight': 0.5, 'text-rotation': 'autorotate' } },
   // 聚焦模式：非邻域淡化
   { selector: 'node.faded', style: { 'opacity': 0.15, 'text-opacity': 0.2, 'events': 'no' } },
   { selector: 'edge.faded', style: { 'opacity': 0.12, 'text-opacity': 0.0, 'events': 'no' } },
   // 根据弧度方向微调文本，向上弯时上移 6px，向下弯时下移 6px
   { selector: 'edge[cpd > 0]', style: { 'text-margin-y': -6 } },
   { selector: 'edge[cpd < 0]', style: { 'text-margin-y': 6 } },
-  { selector: 'edge.dual', style: { 'source-arrow-shape': 'triangle', 'source-arrow-color': '#CBD5E1' } },
+  { selector: 'edge.dual', style: { 'source-arrow-shape': 'triangle', 'source-arrow-color': p.edge } },
   { selector: 'edge.auto', style: { 'line-style': 'dashed' } },
   { selector: 'edge.auto-b', style: { 'source-arrow-shape': 'none' } },
     ]
@@ -194,6 +287,21 @@ function renderGraph(nodes, edges) {
     }
   });
 
+  // 节点右键菜单
+  cy.on('cxttap', 'node', (evt) => {
+    const n = evt.target;
+    if (!n.selected()) {
+      cy.nodes().unselect();
+      n.select();
+    }
+    selectedNode = n;
+    updateEditor(n.id());
+    const e = evt.originalEvent || {};
+    openNodeContextMenu(n.id(), e.clientX || 0, e.clientY || 0);
+    if (typeof evt.preventDefault === 'function') evt.preventDefault();
+    if (typeof evt.stopPropagation === 'function') evt.stopPropagation();
+  });
+
   // 仅在用户完成拖拽后保存一次（含多选），并去抖，避免高频 PUT
   cy.on('dragfree', 'node', (evt) => {
     const union = cy.nodes(':selected').union(evt.target);
@@ -210,7 +318,13 @@ function renderGraph(nodes, edges) {
           const pos = n ? n.position() : null;
           return pos ? { id, position: { x: pos.x, y: pos.y } } : null;
         }).filter(Boolean);
-        if (payload.length) await axios.post('/api/nodes/positions', payload);
+        if (!payload.length) return;
+        // 图层视图：只写该图层的位置排版；全局视图：写主文件节点位置
+        if (activeLayerId) {
+          await axios.post(`/api/layers/${activeLayerId}/positions`, payload);
+        } else {
+          await axios.post('/api/nodes/positions', payload);
+        }
       } catch {}
     }, 50);
   });
@@ -308,6 +422,586 @@ function renderGraph(nodes, edges) {
   });
 }
 
+// ===== 视图筛选：搜索 + 分组视图统一显隐 =====
+// 解析搜索框表达式，返回匹配节点 id 集合；空搜索返回 null（表示不限制）
+function getSearchMatchedIds(q) {
+  if (!q) return null;
+  const raws = Array.isArray(window.__rawNodes) ? window.__rawNodes : [];
+  const norm = q
+    .replaceAll('||', ' OR ').replaceAll('或', ' OR ')
+    .replaceAll('&&', ' AND ').replaceAll('与', ' AND ')
+    .replace(/\s+/g, ' ').trim();
+  const orGroups = norm.split(/\sOR\s/i);
+  const idSet = new Set();
+  const matchTerm = (node, term) => {
+    term = term.trim();
+    if (!term) return false;
+    const fields = node.fields || [];
+    const has = (pred) => fields.some(pred);
+    if (term.toLowerCase().startsWith('key:')) return has(f => String(f.key || '').includes(term.slice(4)));
+    if (term.toLowerCase().startsWith('value:')) return has(f => String(f.value || '').includes(term.slice(6)));
+    const idx = term.indexOf(':');
+    if (idx > 0) {
+      const kpat = term.slice(0, idx), vpat = term.slice(idx + 1);
+      return has(f => String(f.key || '').includes(kpat) && String(f.value || '').includes(vpat));
+    }
+    return has(f => String(f.value || '').includes(term));
+  };
+  const groupMatches = (node, group) => group.split(/\sAND\s|\s+/i).filter(Boolean).every(t => matchTerm(node, t));
+  raws.forEach(n => { if (orGroups.some(g => groupMatches(n, g))) idSet.add(n.id); });
+  return idSet;
+}
+
+// 若当前查看的图层已被删除，回退到全局浏览
+function ensureLayerValid() {
+  if (activeLayerId && !cachedLayers.some(l => l.id === activeLayerId)) {
+    activeLayerId = null;
+    return true;
+  }
+  return false;
+}
+
+// 搜索框的匹配结果（图层成员已由数据层过滤，这里只做显示层叠加）
+function computeAllowedIds() {
+  const q = (document.getElementById('search')?.value || '').trim();
+  return getSearchMatchedIds(q);
+}
+
+// 编组框与角标：仅全局浏览时按开关显示；图层视图下始终隐藏
+function syncGroupOverlay() {
+  const show = !activeLayerId && showGroupBoxes;
+  groupDomCache.forEach((entry) => {
+    if (entry.path) entry.path.style.display = show ? '' : 'none';
+    if (entry.label) entry.label.style.display = show ? '' : 'none';
+  });
+  groupBadgeCache.forEach((badge) => {
+    if (badge) badge.style.display = show ? '' : 'none';
+  });
+}
+
+// 统一应用视图筛选：仅按搜索结果显隐（节点集合由当前图层/全局决定），auto 边沿用自动关联筛选
+function applyViewFilter() {
+  if (!cy) return;
+  const allowed = computeAllowedIds();
+  cy.batch(() => {
+    cy.nodes().forEach(n => n.style('display', (!allowed || allowed.has(n.id())) ? 'element' : 'none'));
+    cy.edges().forEach(e => {
+      if (e.hasClass('auto')) return; // auto 边由自动关联筛选单独控制
+      const s = e.source().id(), t = e.target().id();
+      const visible = !allowed || (allowed.has(s) && allowed.has(t));
+      e.style('display', visible ? 'element' : 'none');
+    });
+  });
+  applyAutoEdgeFilter();
+  syncGroupOverlay();
+  updateFocusBySelection();
+}
+
+async function refreshLayersCache() {
+  try {
+    const { data } = await axios.get('/api/layers');
+    cachedLayers = Array.isArray(data) ? data : [];
+  } catch { cachedLayers = []; }
+  ensureLayerValid();
+}
+
+// 展开/折叠的文件夹 id 集合
+const collapsedFolders = new Set();
+
+// 判断拖拽是否合法：不能拖到自己/自己的后代里，目标必须是文件夹（或全局）
+function canMoveLayer(id, parentId) {
+  if (!id || id === parentId) return false;
+  if (!cachedLayers.some(l => l.id === id)) return false;
+  if (!parentId) return true;
+  const parent = cachedLayers.find(l => l.id === parentId && l.kind === 'folder');
+  if (!parent) return false;
+  let cur = parentId;
+  const seen = new Set();
+  while (cur && !seen.has(cur)) {
+    if (cur === id) return false;
+    seen.add(cur);
+    cur = (cachedLayers.find(l => l.id === cur) || {}).parentId;
+  }
+  return true;
+}
+
+function renderLayerPanel() {
+  const list = document.getElementById('gvp-list');
+  if (!list) return;
+  list.innerHTML = '';
+  const clearDropHints = () => list.querySelectorAll('.drop-hover').forEach(el => el.classList.remove('drop-hover'));
+
+  const attachDropTarget = (btn, parentId) => {
+    btn.ondragover = (ev) => {
+      if (!dragSourceId || !canMoveLayer(dragSourceId, parentId)) return;
+      ev.preventDefault();
+      if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'move';
+      btn.classList.add('drop-hover');
+    };
+    btn.ondragleave = () => btn.classList.remove('drop-hover');
+    btn.ondrop = (ev) => {
+      ev.preventDefault();
+      btn.classList.remove('drop-hover');
+      const id = dragSourceId || (ev.dataTransfer ? ev.dataTransfer.getData('text/plain') : '');
+      dragSourceId = null;
+      if (id) moveLayerToParent(id, parentId);
+    };
+  };
+
+  const makeRow = (label, opts = {}) => {
+    const { value = null, kind = 'layer', color = null, count = null, depth = 0, active = false } = opts;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'gvp-item'
+      + (active ? ' active' : '')
+      + (kind === 'folder' ? ' gvp-folder' : '')
+      + (value && value === contextTargetId ? ' context-target' : '');
+    btn.style.paddingLeft = (9 + depth * 14) + 'px';
+    if (kind === 'folder') {
+      const arrow = document.createElement('span');
+      arrow.className = 'gvp-arrow';
+      arrow.textContent = collapsedFolders.has(value) ? '▸' : '▾';
+      btn.appendChild(arrow);
+    } else if (color) {
+      const dot = document.createElement('span'); dot.className = 'gvp-dot'; dot.style.background = color; btn.appendChild(dot);
+    }
+    const name = document.createElement('span'); name.className = 'gvp-name'; name.textContent = label; btn.appendChild(name);
+    if (typeof count === 'number') { const c = document.createElement('span'); c.className = 'gvp-count'; c.textContent = String(count); btn.appendChild(c); }
+    if (kind === 'global') {
+      const sw = document.createElement('label');
+      sw.className = 'gvp-switch';
+      sw.title = '显示 / 隐藏画布上的编组彩色框';
+      const caption = document.createElement('span');
+      caption.className = 'gvp-switch-label';
+      caption.textContent = '编组框';
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = showGroupBoxes;
+      input.setAttribute('aria-label', '显示编组彩色框');
+      const track = document.createElement('span');
+      track.className = 'gvp-switch-track';
+      sw.append(caption, input, track);
+      sw.onclick = (ev) => ev.stopPropagation();
+      input.onchange = () => {
+        showGroupBoxes = input.checked;
+        try { localStorage.setItem(GROUP_BOXES_STORAGE_KEY, showGroupBoxes ? '1' : '0'); } catch {}
+        syncGroupOverlay();
+      };
+      btn.appendChild(sw);
+    }
+    btn.onclick = () => {
+      if (kind === 'folder') {
+        contextTargetId = value;
+        collapsedFolders.has(value) ? collapsedFolders.delete(value) : collapsedFolders.add(value);
+        renderLayerPanel();
+      } else if (kind === 'layer') {
+        contextTargetId = value;
+        setActiveLayer(value);
+      } else {
+        contextTargetId = null;
+        setActiveLayer(null);
+      }
+    };
+    btn.oncontextmenu = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (kind === 'global') return;
+      contextTargetId = value;
+      renderLayerPanel();
+      openLayerContextMenu(value, ev.clientX, ev.clientY);
+    };
+    if (value) {
+      btn.dataset.layerId = value;
+      btn.draggable = true;
+      btn.ondragstart = (ev) => {
+        dragSourceId = value;
+        if (ev.dataTransfer) {
+          ev.dataTransfer.effectAllowed = 'move';
+          try { ev.dataTransfer.setData('text/plain', value); } catch {}
+        }
+        btn.classList.add('dragging');
+      };
+      btn.ondragend = () => {
+        btn.classList.remove('dragging');
+        dragSourceId = null;
+        clearDropHints();
+      };
+    }
+    if (kind === 'folder' || kind === 'global') attachDropTarget(btn, value);
+    list.appendChild(btn);
+    return btn;
+  };
+
+  makeRow('全局浏览', { value: null, kind: 'global', color: '#9ca3af', active: !activeLayerId });
+  if (!cachedLayers.length) {
+    const empty = document.createElement('div');
+    empty.className = 'gvp-empty'; empty.textContent = '暂无图层，点下方按钮创建';
+    list.appendChild(empty);
+    return;
+  }
+  const childrenOf = (pid) => cachedLayers.filter(l => (l.parentId || null) === pid);
+  const renderChildren = (parentId, depth) => {
+    childrenOf(parentId).forEach(l => {
+      const isFolder = l.kind === 'folder';
+      const kids = isFolder ? childrenOf(l.id) : [];
+      makeRow(l.label || (isFolder ? '文件夹' : '图层'), {
+        value: l.id, kind: isFolder ? 'folder' : 'layer',
+        color: l.color || '#3b82f6',
+        count: isFolder ? kids.length : (l.members || []).length,
+        depth, active: !isFolder && l.id === activeLayerId,
+      });
+      if (isFolder && !collapsedFolders.has(l.id)) renderChildren(l.id, depth + 1);
+    });
+  };
+  renderChildren(null, 0);
+}
+
+async function setActiveLayer(id) {
+  if (activeLayerId === (id || null)) return;
+  activeLayerId = id || null;
+  renderLayerPanel();
+  await refresh(false); // 用目标图层的专属位置重新渲染，不保留上一视图位置
+  const vis = cy ? cy.nodes().filter(n => n.style('display') !== 'none') : null;
+  if (cy && vis && vis.length) cy.animate({ fit: { eles: vis, padding: 90 }, duration: 300 });
+}
+
+function closeLayerContextMenu() {
+  const menu = document.getElementById('layer-context-menu');
+  if (!menu) return;
+  menu.hidden = true;
+  menu.innerHTML = '';
+}
+
+function openLayerContextMenu(id, x, y) {
+  const menu = document.getElementById('layer-context-menu');
+  const layer = cachedLayers.find(l => l.id === id);
+  if (!menu || !layer) return;
+  closeNodeContextMenu();
+  const isFolder = layer.kind === 'folder';
+  const label = layer.label || (isFolder ? '文件夹' : '图层');
+  const items = isFolder ? [
+    { label: '重命名文件夹', action: () => renameLayer(id) },
+    { label: '复制文件夹（含子项）', action: () => duplicateLayer(id) },
+    { label: '在此新建子文件夹', action: () => createFolder(id) },
+    { sep: true },
+    { label: '解散文件夹（子项保留）', action: () => dissolveLayer(id) },
+    { label: '删除文件夹及全部子项', danger: true, action: () => deleteLayerTree(id) },
+  ] : [
+    { label: '切换到此图层', action: () => setActiveLayer(id) },
+    { label: '重命名图层', action: () => renameLayer(id) },
+    { label: '复制图层（含排版）', action: () => duplicateLayer(id) },
+    { sep: true },
+    { label: '加入当前选中节点', action: () => changeLayerMembers(id, true) },
+    { label: '移出当前选中节点', action: () => changeLayerMembers(id, false) },
+    { label: '归类到文件夹…', action: () => setLayerParent(id) },
+    ...(layer.parentId ? [{ label: '移出文件夹', action: () => moveLayerToParent(id, null) }] : []),
+    { sep: true },
+    { label: '解散图层成员（清空）', action: () => dissolveLayer(id) },
+    { label: '删除图层', danger: true, action: () => deleteLayer(id) },
+  ];
+
+  menu.innerHTML = '';
+  const title = document.createElement('div');
+  title.className = 'menu-title';
+  title.textContent = label;
+  menu.appendChild(title);
+  items.forEach(item => {
+    if (item.sep) {
+      const sep = document.createElement('div');
+      sep.className = 'menu-sep';
+      menu.appendChild(sep);
+      return;
+    }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.setAttribute('role', 'menuitem');
+    btn.textContent = item.label;
+    if (item.danger) btn.className = 'danger';
+    btn.onclick = async () => {
+      closeLayerContextMenu();
+      await item.action();
+    };
+    menu.appendChild(btn);
+  });
+  menu.hidden = false;
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = Math.max(8, Math.min(x, window.innerWidth - rect.width - 8)) + 'px';
+  menu.style.top = Math.max(8, Math.min(y, window.innerHeight - rect.height - 8)) + 'px';
+}
+
+// ===== 画布节点右键菜单 =====
+function closeNodeContextMenu() {
+  const menu = document.getElementById('node-context-menu');
+  if (!menu) return;
+  menu.hidden = true;
+  menu.innerHTML = '';
+}
+
+function shortNodeLabel(id) {
+  const raw = getNodeById(id);
+  const fields = (raw && raw.fields) || [];
+  const nameField = fields.find(f => f && String(f.key || '') === '名称')
+    || fields.find(f => f && String(f.type || '') === 'text' && f.value);
+  const value = nameField && nameField.value ? String(nameField.value) : '';
+  return value ? (value.length > 18 ? value.slice(0, 18) + '…' : value) : String(id || '').slice(0, 8);
+}
+
+async function addNodeToLayer(nodeId, layerId) {
+  const layer = cachedLayers.find(l => l.id === layerId && l.kind === 'layer');
+  if (!layer) return;
+  const members = new Set(layer.members || []);
+  members.add(nodeId);
+  await axios.put(`/api/layers/${layerId}`, { members: Array.from(members) });
+  const n = cy ? cy.getElementById(nodeId) : null;
+  if (n && n.nonempty()) {
+    const p = n.position();
+    await axios.post(`/api/layers/${layerId}/positions`, [{ id: nodeId, position: { x: p.x, y: p.y } }]);
+  }
+  await syncLayerChange();
+}
+
+async function removeNodeFromCurrentLayer(nodeId) {
+  if (!activeLayerId) return;
+  const layer = cachedLayers.find(l => l.id === activeLayerId);
+  if (!layer) return;
+  const members = (layer.members || []).filter(id => id !== nodeId);
+  await axios.put(`/api/layers/${activeLayerId}`, { members });
+  await syncLayerChange(true);
+}
+
+async function deleteNodeById(nodeId) {
+  const label = shortNodeLabel(nodeId);
+  if (!confirm(`删除节点「${label}」？\n相关连线会一并删除，其他图层中的引用也会清理。`)) return;
+  await axios.delete(`/api/nodes/${nodeId}`);
+  if (contextTargetId === nodeId) contextTargetId = null;
+  await refresh(false);
+}
+
+function openNodeContextMenu(id, x, y) {
+  const menu = document.getElementById('node-context-menu');
+  if (!menu || !id) return;
+  closeLayerContextMenu();
+  const items = [
+    { label: '复制节点', action: () => (window.duplicateSelectedNode ? window.duplicateSelectedNode() : Promise.resolve()) },
+    { label: '删除节点', danger: true, action: () => deleteNodeById(id) },
+  ];
+  if (activeLayerId) {
+    items.push({ sep: true });
+    items.push({ label: '从当前图层移出', action: () => removeNodeFromCurrentLayer(id) });
+  }
+  items.push({ sep: true });
+  items.push({ group: '加入已有图层 / 文件夹' });
+
+  const layerCount = cachedLayers.filter(l => l.kind === 'layer').length;
+  if (!layerCount) {
+    items.push({ text: '暂无图层，请先创建一个图层' });
+  } else {
+    const appendChildren = (parentId, depth) => {
+      cachedLayers
+        .filter(l => l.kind === 'folder' && (l.parentId || null) === parentId)
+        .forEach(f => {
+          items.push({ group: `▾ ${f.label || '文件夹'}`, depth });
+          appendChildren(f.id, depth + 1);
+        });
+      cachedLayers
+        .filter(l => l.kind === 'layer' && (l.parentId || null) === parentId)
+        .forEach(l => {
+          const already = (l.members || []).includes(id);
+          items.push({ layerId: l.id, label: `${already ? '✓ ' : '● '}${l.label || '图层'}`, depth, color: l.color });
+        });
+    };
+    appendChildren(null, 0);
+  }
+
+  menu.innerHTML = '';
+  const title = document.createElement('div');
+  title.className = 'menu-title';
+  title.textContent = `节点：${shortNodeLabel(id)}`;
+  menu.appendChild(title);
+  items.forEach(item => {
+    if (item.sep) {
+      const sep = document.createElement('div'); sep.className = 'menu-sep'; menu.appendChild(sep); return;
+    }
+    if (item.group) {
+      const g = document.createElement('div');
+      g.className = 'menu-group';
+      g.textContent = item.group;
+      g.style.paddingLeft = (10 + (item.depth || 0) * 12) + 'px';
+      menu.appendChild(g);
+      return;
+    }
+    if (item.text) {
+      const t = document.createElement('div');
+      t.className = 'menu-empty';
+      t.textContent = item.text;
+      menu.appendChild(t);
+      return;
+    }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.setAttribute('role', 'menuitem');
+    btn.textContent = item.label;
+    btn.style.paddingLeft = (10 + (item.depth || 0) * 12) + 'px';
+    if (item.danger) btn.className = 'danger';
+    if (item.color) btn.style.borderLeft = `3px solid ${item.color}`;
+    btn.onclick = async () => {
+      closeNodeContextMenu();
+      if (item.layerId) await addNodeToLayer(id, item.layerId);
+      else await item.action();
+    };
+    menu.appendChild(btn);
+  });
+  menu.hidden = false;
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = Math.max(8, Math.min(x, window.innerWidth - rect.width - 8)) + 'px';
+  menu.style.top = Math.max(8, Math.min(y, window.innerHeight - rect.height - 8)) + 'px';
+}
+
+let layerContextListenersReady = false;
+function setupLayerPanel() {
+  const toggle = document.getElementById('gvp-toggle');
+  const panel = document.getElementById('group-view-panel');
+  if (toggle && panel && !toggle.dataset.bound) {
+    toggle.dataset.bound = '1';
+    toggle.onclick = () => {
+      const collapsed = panel.classList.toggle('collapsed');
+      toggle.textContent = collapsed ? '+' : '−';
+    };
+  }
+  if (!layerContextListenersReady) {
+    layerContextListenersReady = true;
+    document.addEventListener('click', (ev) => {
+      const layerMenu = document.getElementById('layer-context-menu');
+      const nodeMenu = document.getElementById('node-context-menu');
+      if (layerMenu && !layerMenu.hidden && !layerMenu.contains(ev.target)) closeLayerContextMenu();
+      if (nodeMenu && !nodeMenu.hidden && !nodeMenu.contains(ev.target)) closeNodeContextMenu();
+    });
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape') { closeLayerContextMenu(); closeNodeContextMenu(); }
+    });
+    const closeBoth = () => { closeLayerContextMenu(); closeNodeContextMenu(); };
+    window.addEventListener('resize', closeBoth);
+    const list = document.getElementById('gvp-list');
+    if (list) list.addEventListener('scroll', closeBoth, true);
+  }
+  const bind = (id, handler) => {
+    const el = document.getElementById(id);
+    if (el && !el.dataset.bound) { el.dataset.bound = '1'; el.onclick = handler; }
+  };
+  bind('gvp-new-layer', () => createLayerFromSelection());
+  bind('gvp-new-folder', () => createFolder());
+  renderLayerPanel();
+}
+
+// 当前选中节点 id
+function selectedNodeIds() {
+  const sel = cy ? cy.nodes(':selected') : null;
+  return sel ? sel.map(n => n.id()) : [];
+}
+
+// 图层/文件夹增删改后同步缓存与面板；reloadGraph=true 时重新按图层取节点
+async function syncLayerChange(reloadGraph = false) {
+  await refreshLayersCache();
+  renderLayerPanel();
+  if (reloadGraph) await refresh(false);
+}
+
+async function createLayerFromSelection() {
+  const ids = selectedNodeIds();
+  if (!ids.length) { alert('请先选中一个或多个节点，再新建图层（会以这些节点及其当前位置初始化图层）。'); return; }
+  const label = prompt('新图层名称：', `图层 ${cachedLayers.filter(l => l.kind === 'layer').length + 1}`);
+  if (!label) return;
+  const { data } = await axios.post('/api/layers', { kind: 'layer', label, members: ids, snapshot: true });
+  await refreshLayersCache();
+  renderLayerPanel();
+  await setActiveLayer(data.id);
+}
+
+async function createFolder(parentId = null) {
+  const label = prompt('新文件夹名称：', `文件夹 ${cachedLayers.filter(l => l.kind === 'folder').length + 1}`);
+  if (!label) return;
+  await axios.post('/api/layers', { kind: 'folder', label, parentId });
+  await syncLayerChange();
+}
+
+async function changeLayerMembers(id, add) {
+  const layer = cachedLayers.find(l => l.id === id);
+  if (!layer) return;
+  const ids = selectedNodeIds();
+  if (!ids.length) { alert('请先选中节点。'); return; }
+  const members = new Set(layer.members || []);
+  ids.forEach(mid => add ? members.add(mid) : members.delete(mid));
+  await axios.put(`/api/layers/${id}`, { members: Array.from(members) });
+  await syncLayerChange(activeLayerId === id);
+}
+
+async function renameLayer(id) {
+  const layer = cachedLayers.find(l => l.id === id);
+  if (!layer) return;
+  const label = prompt(layer.kind === 'folder' ? '重命名文件夹：' : '重命名图层：', layer.label || '');
+  if (!label) return;
+  await axios.put(`/api/layers/${id}`, { label });
+  await syncLayerChange();
+}
+
+async function moveLayerToParent(id, parentId) {
+  if (!canMoveLayer(id, parentId)) return;
+  await axios.put(`/api/layers/${id}`, { parentId });
+  await syncLayerChange();
+}
+
+async function setLayerParent(id) {
+  const layer = cachedLayers.find(l => l.id === id);
+  if (!layer) return;
+  const folders = cachedLayers.filter(f => f.kind === 'folder' && canMoveLayer(id, f.id));
+  const options = [['0', '（顶层，不归类）'], ...folders.map(f => [f.id, f.label || '文件夹'])];
+  const lines = options.map(([fid, label], i) => `${i + 1}. ${label}`).join('\n');
+  const answer = prompt(`把「${layer.label || '图层'}」归类到：\n${lines}\n\n输入序号：`, '1');
+  if (!answer) return;
+  const idx = parseInt(answer, 10) - 1;
+  if (!(idx >= 0 && idx < options.length)) { alert('无效序号'); return; }
+  await moveLayerToParent(id, options[idx][0] === '0' ? null : options[idx][0]);
+}
+
+async function duplicateLayer(id) {
+  const layer = cachedLayers.find(l => l.id === id);
+  if (!layer) return;
+  await axios.post(`/api/layers/${id}/duplicate`);
+  await syncLayerChange();
+}
+
+async function dissolveLayer(id) {
+  const layer = cachedLayers.find(l => l.id === id);
+  if (!layer) return;
+  if (layer.kind === 'folder') {
+    if (!confirm(`解散文件夹「${layer.label || '文件夹'}」？\n其中的图层/文件夹会保留并移到上一层。`)) return;
+  } else {
+    if (!confirm(`解散图层「${layer.label || '图层'}」的成员？\n图层与排版定义会保留，节点仍留在全局。`)) return;
+  }
+  await axios.post(`/api/layers/${id}/dissolve`);
+  await syncLayerChange(activeLayerId === id);
+}
+
+async function deleteLayer(id) {
+  const layer = cachedLayers.find(l => l.id === id);
+  if (!layer) return;
+  if (!confirm(`删除${layer.kind === 'folder' ? '文件夹' : '图层'}「${layer.label || ''}」？\n节点本身不会被删除。`)) return;
+  await axios.delete(`/api/layers/${id}`);
+  if (activeLayerId === id) activeLayerId = null;
+  if (contextTargetId === id) contextTargetId = null;
+  await syncLayerChange(true);
+}
+
+async function deleteLayerTree(id) {
+  const layer = cachedLayers.find(l => l.id === id);
+  if (!layer) return;
+  if (!confirm(`删除文件夹「${layer.label || ''}」及其中全部子项？\n节点本身不会被删除，只会删除这些排版图层。`)) return;
+  await axios.post(`/api/layers/${id}/delete-tree`);
+  if (activeLayerId === id || (cachedLayers.find(l => l.id === activeLayerId) || {}).parentId === id) activeLayerId = null;
+  if (contextTargetId === id) contextTargetId = null;
+  await syncLayerChange(true);
+}
+
 async function refresh(preservePositions = true) {
   const { nodes, edges, rawNodes } = await loadData();
   // 可选：保持当前已存在节点的位置，避免因服务端未及时保存导致位置回弹
@@ -330,6 +1024,9 @@ async function refresh(preservePositions = true) {
   // 同步编组缓存并渲染群组
   await refreshGroupsCache();
   renderGroups();
+  await refreshLayersCache();
+  setupLayerPanel();
+  applyViewFilter();
 }
 
 function editorHtml(node) {
@@ -583,8 +1280,10 @@ function renderGroups() {
       lbl.className = 'group-label';
       lbl.style.position = 'absolute';
       lbl.style.padding = '2px 6px';
-      lbl.style.background = '#fff';
-      lbl.style.border = '1px solid #e5e7eb';
+      const theme = themePalette();
+      lbl.style.background = theme.groupLabelBg;
+      lbl.style.border = `1px solid ${theme.groupLabelBorder}`;
+      lbl.style.color = theme.groupLabelText;
       lbl.style.borderRadius = '6px';
       lbl.style.fontSize = '12px';
       lbl.style.cursor = 'move';
@@ -595,6 +1294,10 @@ function renderGroups() {
     }
 
     const { box, label } = entry;
+    const currentTheme = themePalette();
+    label.style.background = currentTheme.groupLabelBg;
+    label.style.border = `1px solid ${currentTheme.groupLabelBorder}`;
+    label.style.color = currentTheme.groupLabelText;
     if (!box.isConnected) container.appendChild(box);
     if (!label.isConnected) container.appendChild(label);
 
@@ -620,11 +1323,16 @@ function renderGroups() {
       const onUp = async () => {
         window.removeEventListener('mousemove', onMove);
         window.removeEventListener('mouseup', onUp);
-        for (let i = 0; i < eles.length; i++) {
-          const n = eles[i];
-          const id = n.id();
+        const payload = [];
+        eles.forEach(n => {
           const pos = n.position();
-          try { await axios.put(`/api/nodes/${id}`, { position: pos }); } catch {}
+          payload.push({ id: n.id(), position: { x: pos.x, y: pos.y } });
+        });
+        if (payload.length) {
+          try {
+            if (activeLayerId) await axios.post(`/api/layers/${activeLayerId}/positions`, payload);
+            else await axios.post('/api/nodes/positions', payload);
+          } catch {}
         }
         renderGroups();
       };
@@ -722,7 +1430,8 @@ function renderGroups() {
       holes.push(roundedRectPath(holeBb, Math.min(22, Math.max(12, Math.min(holeBb.x2 - holeBb.x1, holeBb.y2 - holeBb.y1) / 2))));
     });
     pathEl.setAttribute('d', [roundedRectPath(bb, 16), ...holes].join(' '));
-    pathEl.setAttribute('fill', hexToRgba(color, opacity));
+    const fillOpacity = isDarkTheme() ? Math.max(opacity, 0.14) : opacity;
+    pathEl.setAttribute('fill', hexToRgba(color, fillOpacity));
     pathEl.setAttribute('stroke', color);
     pathEl.setAttribute('stroke-width', '1.5');
     pathEl.setAttribute('fill-rule', 'evenodd');
@@ -756,8 +1465,10 @@ function renderGroups() {
       lbl.className = 'group-label';
       lbl.style.position = 'absolute';
       lbl.style.padding = '2px 6px';
-      lbl.style.background = '#fff';
-      lbl.style.border = '1px solid #e5e7eb';
+      const theme = themePalette();
+      lbl.style.background = theme.groupLabelBg;
+      lbl.style.border = `1px solid ${theme.groupLabelBorder}`;
+      lbl.style.color = theme.groupLabelText;
       lbl.style.borderRadius = '6px';
       lbl.style.fontSize = '12px';
       lbl.style.cursor = 'move';
@@ -768,6 +1479,10 @@ function renderGroups() {
     }
 
     const { path, label } = entry;
+    const currentTheme = themePalette();
+    label.style.background = currentTheme.groupLabelBg;
+    label.style.border = `1px solid ${currentTheme.groupLabelBorder}`;
+    label.style.color = currentTheme.groupLabelText;
     if (!path.isConnected) svg.appendChild(path);
     if (!label.isConnected) container.appendChild(label);
 
@@ -791,11 +1506,16 @@ function renderGroups() {
       const onUp = async () => {
         window.removeEventListener('mousemove', onMove);
         window.removeEventListener('mouseup', onUp);
-        for (let i = 0; i < eles.length; i++) {
-          const n = eles[i];
-          const id = n.id();
+        const payload = [];
+        eles.forEach(n => {
           const pos = n.position();
-          try { await axios.put(`/api/nodes/${id}`, { position: pos }); } catch {}
+          payload.push({ id: n.id(), position: { x: pos.x, y: pos.y } });
+        });
+        if (payload.length) {
+          try {
+            if (activeLayerId) await axios.post(`/api/layers/${activeLayerId}/positions`, payload);
+            else await axios.post('/api/nodes/positions', payload);
+          } catch {}
         }
         renderGroups();
       };
@@ -838,6 +1558,7 @@ function renderGroups() {
       groupBadgeCache.delete(nodeId);
     }
   });
+  syncGroupOverlay();
 }
 
 async function refreshGroupsCache() {
@@ -848,8 +1569,15 @@ async function refreshGroupsCache() {
 }
 
 async function bootstrap() {
+  applyTheme(isDarkTheme(), false);
   await initTemplates();
   await refresh();
+  // 首次加载按当前画布尺寸把可见内容完整纳入视野，避免节点挤在角落
+  if (cy) {
+    cy.resize();
+    const visible = cy.nodes().filter(n => n.style('display') !== 'none');
+    if (visible.length) { try { cy.fit(visible, 60); } catch {} }
+  }
 
   function setHelpOpen(open) {
     const panel = document.getElementById('help-panel');
@@ -916,6 +1644,7 @@ async function bootstrap() {
       }
     }
     const payload = center ? { fields, position: center } : { fields };
+    if (activeLayerId) payload.layerId = activeLayerId;
     const { data } = await axios.post('/api/nodes', payload);
     await refresh();
     selectedNode = cy.getElementById(data.id);
@@ -946,6 +1675,7 @@ async function bootstrap() {
     }
   }
   const payload = center ? { fields, position: center } : { fields };
+  if (activeLayerId) payload.layerId = activeLayerId;
   const { data } = await axios.post('/api/nodes', payload);
     await refresh();
     selectedNode = cy.getElementById(data.id);
@@ -1055,7 +1785,7 @@ async function bootstrap() {
               list.style.maxHeight = '220px';
               list.style.overflow = 'auto';
               list.style.marginTop = '6px';
-              list.style.borderTop = '1px solid #eee';
+              list.style.borderTop = `1px solid ${themePalette().groupLabelBorder}`;
               list.style.paddingTop = '6px';
               menu.appendChild(list);
             }
@@ -1417,6 +2147,7 @@ async function bootstrap() {
   document.getElementById('btn-redo').onclick = async () => {
     try { await axios.post('/api/redo'); } finally { await refresh(false); }
   };
+  setupThemeToggle();
 
   // 快捷键：Ctrl+Z / Ctrl+Y 及其他
   window.addEventListener('keydown', async (ev) => {
@@ -1483,11 +2214,13 @@ async function bootstrap() {
     const fields = (raw.fields || []).map(f => ({ key: f.key, type: f.type, value: f.value }));
     const pos = node.position();
     const payload = { fields, position: { x: pos.x + 40, y: pos.y + 40 } };
+    if (activeLayerId) payload.layerId = activeLayerId;
     const { data } = await axios.post('/api/nodes', payload);
     await refresh();
     const newNode = cy.getElementById(data.id);
     if (newNode && newNode.nonempty()) { newNode.select(); updateEditor(data.id); }
   }
+  window.duplicateSelectedNode = duplicateSelectedNode;
 
   async function deleteSelection() {
     const sels = cy ? cy.elements(':selected') : null;
@@ -1512,79 +2245,7 @@ async function bootstrap() {
     await refresh();
   }
 
-  document.getElementById('search').oninput = (e) => {
-    const q = (e.target.value || '').trim();
-    const raws = Array.isArray(window.__rawNodes) ? window.__rawNodes : [];
-    if (!q) {
-      // restore all
-      cy.batch(() => {
-        cy.nodes().style('display', 'element');
-        cy.edges().style('display', 'element');
-      });
-      updateFocusBySelection();
-      return;
-    }
-
-    // Parse query with AND/OR support
-    const norm = q
-      .replaceAll('||', ' OR ')
-      .replaceAll('或', ' OR ')
-      .replaceAll('&&', ' AND ')
-      .replaceAll('与', ' AND ')
-      .replace(/\s+/g, ' ') // collapse spaces
-      .trim();
-    const orGroups = norm.split(/\sOR\s/i);
-
-    const idSet = new Set();
-
-    const matchTerm = (node, term) => {
-      term = term.trim();
-      if (!term) return false;
-      const fields = node.fields || [];
-      const has = (pred) => fields.some(pred);
-      // key:... value:... or key:value
-      const idx = term.indexOf(':');
-      if (term.toLowerCase().startsWith('key:')) {
-        const pat = term.slice(4);
-        return has(f => String(f.key || '').includes(pat));
-      }
-      if (term.toLowerCase().startsWith('value:')) {
-        const pat = term.slice(6);
-        return has(f => String(f.value || '').includes(pat));
-      }
-      if (idx > 0) {
-        const kpat = term.slice(0, idx);
-        const vpat = term.slice(idx + 1);
-        return has(f => String(f.key || '').includes(kpat) && String(f.value || '').includes(vpat));
-      }
-      // default: value search
-      return has(f => String(f.value || '').includes(term));
-    };
-
-    const groupMatches = (node, group) => {
-      // AND between tokens in group (split on spaces and AND keywords)
-      const tokens = group.split(/\sAND\s|\s+/i).filter(Boolean);
-      return tokens.every(t => matchTerm(node, t));
-    };
-
-    raws.forEach(n => {
-      if (orGroups.some(g => groupMatches(n, g))) {
-        idSet.add(n.id);
-      }
-    });
-
-    cy.batch(() => {
-      cy.nodes().forEach(n => n.style('display', idSet.has(n.id()) ? 'element' : 'none'));
-      cy.edges().forEach(eh => {
-        const s = eh.source().id();
-        const t = eh.target().id();
-        const visible = idSet.has(s) && idSet.has(t);
-        eh.style('display', visible ? 'element' : 'none');
-      });
-    });
-  // 过滤后也应用聚焦态
-  updateFocusBySelection();
-  };
+  document.getElementById('search').oninput = () => { applyViewFilter(); };
 
   document.getElementById('btn-start-link').onclick = () => {
     linkPick = [];
@@ -1637,24 +2298,24 @@ async function bootstrap() {
       // 1) 全图 Blob，递减 scale
       for (const s of scales) {
         try {
-          const blob = await cy.png({ output: 'blob', full: true, scale: s, bg: '#ffffff' });
+          const blob = await cy.png({ output: 'blob', full: true, scale: s, bg: exportBg() });
           if (blob && blob.size > 0) { const url = URL.createObjectURL(blob); makeDownload(url); setTimeout(()=>URL.revokeObjectURL(url),1500); return; }
         } catch {}
       }
       // 2) 全图 base64，递减 scale
       for (const s of scales) {
         try {
-          const data = cy.png({ output: 'base64uri', full: true, scale: s, bg: '#ffffff' });
+          const data = cy.png({ output: 'base64uri', full: true, scale: s, bg: exportBg() });
           if (data && typeof data === 'string' && data.startsWith('data:image/png')) { makeDownload(data); return; }
         } catch {}
       }
       // 3) 仅视窗 Blob/base64
       try {
-        const blob = await cy.png({ output: 'blob', full: false, scale: 2, bg: '#ffffff' });
+        const blob = await cy.png({ output: 'blob', full: false, scale: 2, bg: exportBg() });
         const url = URL.createObjectURL(blob); makeDownload(url); setTimeout(()=>URL.revokeObjectURL(url),1500); return;
       } catch {}
       try {
-        const data = cy.png({ output: 'base64uri', full: false, scale: 2, bg: '#ffffff' });
+        const data = cy.png({ output: 'base64uri', full: false, scale: 2, bg: exportBg() });
         makeDownload(data); return;
       } catch {}
       alert('导出 PNG 失败：图像过大或内存不足，请缩小范围或降低清晰度重试。');
@@ -1687,8 +2348,10 @@ async function bootstrap() {
     if (!dragging) return;
     sidebarWidth = Math.max(220, Math.min(600, e.clientX));
     main.style.gridTemplateColumns = `${sidebarWidth}px 6px 1fr`;
+    scheduleGraphResize();
   });
   window.addEventListener('mouseup', () => { dragging = false; });
+  window.addEventListener('resize', scheduleGraphResize);
   // 初始化一次，确保与 CSS 一致
   main.style.gridTemplateColumns = `${sidebarWidth}px 6px 1fr`;
 }
