@@ -1702,6 +1702,8 @@ async function bootstrap() {
         }
         if (!confirm('此操作将清空当前画布的所有节点与手动关联，且无法撤销。是否继续？')) return;
         await axios.post('/api/reset');
+        // 新建画布会清空全部图层，必须回到全局浏览
+        activeLayerId = null;
         // 清理前端状态
         selectedNode = null;
         focusNodeId = null;
@@ -1995,6 +1997,29 @@ async function bootstrap() {
     if (!currentGroupId || !getCurrentGroup()) currentGroupId = cachedGroups[0]?.id || null;
     renderGroupManager();
   };
+
+  // 从编组导入到图层窗：按编组成员/位置刷新已关联图层，并为缺失的编组补建图层。
+  // 用于修复旧数据中「编组有成员、图层却是空壳」的问题。
+  const importGroupsToLayers = async () => {
+    await refreshGroupsCache();
+    if (!cachedGroups.length) {
+      alert('当前没有编组，无法导入图层窗。');
+      return;
+    }
+    const total = cachedGroups.reduce((sum, g) => sum + ((g.members || []).length), 0);
+    if (!confirm(`把当前 ${cachedGroups.length} 个编组（共 ${total} 个成员）导入到图层窗？\n\n· 已关联的图层会按编组刷新成员与位置（保留原文件夹归类）\n· 尚未关联图层窗的编组会自动补建图层\n· 手动新建的图层与文件夹不会被动到`)) return;
+    try {
+      const { data } = await axios.post('/api/layers/import-from-groups');
+      await refreshLayersCache();
+      renderLayerPanel();
+      // 当前停留在某个图层时，重新载入画布以显示刚导入的成员
+      if (activeLayerId) await refresh(false);
+      setGroupStatus(`已导入：新建 ${data.created} 个图层，刷新 ${data.refreshed} 个图层，共 ${data.members} 个成员`);
+    } catch {
+      alert('导入图层窗失败');
+    }
+  };
+
   const setupGroupManager = () => {
     const root = document.getElementById('dd-group');
     const menu = root ? root.querySelector('.menu') : null;
@@ -2007,6 +2032,7 @@ async function bootstrap() {
           <button id="btn-group-create">以备选节点创建</button>
           <button id="btn-group-save">保存编组</button>
           <button id="btn-group-delete">删除编组</button>
+          <button id="btn-group-import-layers" class="group-import-btn" title="把当前所有编组的成员与位置同步进右下角图层窗">导入图层窗</button>
         </div>
         <div class="group-manager-body">
           <div class="group-manager-list-wrap">
@@ -2090,6 +2116,8 @@ async function bootstrap() {
         await openGroupManager();
         renderGroups();
         setGroupStatus(`Removed ${selected.size} node(s)`);
+      } else if (target.id === 'btn-group-import-layers') {
+        await importGroupsToLayers();
       }
     });
     trigger.addEventListener('click', () => { setTimeout(() => { if (root.classList.contains('open')) openGroupManager(); }, 0); });
@@ -2328,6 +2356,12 @@ async function bootstrap() {
     const text = await file.text();
     const obj = JSON.parse(text);
     await axios.post('/api/import/json', obj);
+    // 导入会整体替换图层；当前激活图层若已不在新数据中则回到全局浏览，
+    // 否则 loadData() 会带着失效的 layer id 请求，导致画布与小窗状态不一致。
+    try {
+      const { data: layers } = await axios.get('/api/layers');
+      if (activeLayerId && !(layers || []).some(l => l && l.id === activeLayerId)) activeLayerId = null;
+    } catch {}
     await refresh();
   };
 

@@ -23,10 +23,18 @@ def create_app() -> Flask:
     redo_stack: List[Dict[str, Any]] = []
     MAX_HISTORY = 100
 
-    def write_with_undo(new_data: Dict[str, Any], prev_data: Dict[str, Any]) -> None:
+    def write_with_undo(
+        new_data: Dict[str, Any],
+        prev_data: Dict[str, Any],
+        prev_layers: Dict[str, Any] | None = None,
+    ) -> None:
         nonlocal undo_stack, redo_stack
-        # push previous snapshot
-        undo_stack.append(deepcopy(prev_data))
+        # 一条历史记录同时携带主数据与图层快照。
+        # prev_layers=None 表示该操作没有改动图层，撤销时保持图层不变。
+        undo_stack.append({
+            "data": deepcopy(prev_data),
+            "layers": deepcopy(prev_layers) if prev_layers is not None else None,
+        })
         if len(undo_stack) > MAX_HISTORY:
             undo_stack.pop(0)
         # any new mutation clears redo
@@ -273,13 +281,83 @@ def create_app() -> Flask:
         if not isinstance(body, dict) or "nodes" not in body:
             return jsonify({"error": "invalid data"}), 400
         prev = read_all()
+        prev_layers = read_layers()
+        nodes_in = [n for n in (body.get("nodes") or []) if isinstance(n, dict)]
+        node_ids = {n.get("id") for n in nodes_in}
+        node_pos = {n.get("id"): n.get("position") for n in nodes_in}
+
+        # 导入是"整体替换"，图层窗也必须跟着替换：
+        # 1) 新格式导出（含 layers）：原样恢复，剔除指向不存在节点的成员/位置与悬空父级；
+        # 2) 旧备份（无 layers 但有 groups）：由编组重建图层，保留旧的分组语义；
+        # 3) 旧备份且无 groups：图层窗清空。
+        if isinstance(body.get("layers"), list):
+            restored: List[Dict[str, Any]] = []
+            for raw in body["layers"]:
+                if not isinstance(raw, dict):
+                    continue
+                item = deepcopy(raw)
+                if item.get("kind") == "layer":
+                    seen = set()
+                    members = []
+                    for m in (item.get("members") or []):
+                        if isinstance(m, str) and m in node_ids and m not in seen:
+                            seen.add(m)
+                            members.append(m)
+                    item["members"] = members
+                    positions = item.get("positions") or {}
+                    item["positions"] = {
+                        k: v for k, v in positions.items()
+                        if k in seen and isinstance(v, dict)
+                    }
+                else:
+                    item["members"] = []
+                    item["positions"] = {}
+                restored.append(item)
+            folder_ids = {l.get("id") for l in restored if l.get("kind") == "folder"}
+            for item in restored:
+                if item.get("parentId") not in folder_ids:
+                    item["parentId"] = None
+            layers_doc: Dict[str, Any] = {"layers": restored}
+        else:
+            layers_doc = {"layers": []}
+            for g in (body.get("groups") or []):
+                if not isinstance(g, dict):
+                    continue
+                seen = set()
+                members = []
+                for m in (g.get("members") or []):
+                    if isinstance(m, str) and m in node_ids and m not in seen:
+                        seen.add(m)
+                        members.append(m)
+                positions: Dict[str, Any] = {}
+                for mid in members:
+                    p = node_pos.get(mid)
+                    if isinstance(p, dict) and isinstance(p.get("x"), (int, float)) and isinstance(p.get("y"), (int, float)):
+                        positions[mid] = {"x": p["x"], "y": p["y"]}
+                try:
+                    op = float(g.get("opacity")) if g.get("opacity") is not None else 0.08
+                except Exception:
+                    op = 0.08
+                layers_doc["layers"].append({
+                    "id": new_id(),
+                    "label": str(g.get("label") or "编组"),
+                    "kind": "layer",
+                    "parentId": None,
+                    "color": str(g.get("color") or "#3b82f6"),
+                    "opacity": op,
+                    "members": members,
+                    "positions": positions,
+                    "sourceGroup": g.get("id"),
+                })
+
         write_with_undo({
             "nodes": body.get("nodes", []),
             "links": body.get("links", []),
             "suppressedAutoPairs": body.get("suppressedAutoPairs", []),
             "autoEdgeOverrides": body.get("autoEdgeOverrides", {}),
             "groups": body.get("groups", []),
-        }, prev)
+        }, prev, prev_layers)
+        write_layers(layers_doc)
         return jsonify({"ok": True})
 
     @app.post("/api/import/csv")
@@ -311,7 +389,11 @@ def create_app() -> Flask:
 
     @app.get("/api/export/json")
     def export_json():
-        return jsonify(read_all())
+        data = read_all()
+        # 图层定义、成员与独立排版随主数据一起导出，
+        # 保证“导出 → 新建画布 → 导入”后图层窗能完整还原。
+        data["layers"] = read_layers().get("layers", [])
+        return jsonify(data)
 
     # suppress/unsuppress auto links between node pairs
     @app.post("/api/auto/suppress")
@@ -350,15 +432,28 @@ def create_app() -> Flask:
         return jsonify({"ok": True})
 
     # Undo/Redo endpoints
+    def _history_snapshot() -> Dict[str, Any]:
+        return {"data": deepcopy(read_all()), "layers": deepcopy(read_layers())}
+
+    def _restore_history(entry: Any) -> None:
+        # 新历史项：data/layers 任一项为 None 表示那部分未变化，跳过。
+        # 兼容旧历史项（直接是 data 字典）：只恢复主数据。
+        if isinstance(entry, dict) and "data" in entry and "layers" in entry:
+            if entry.get("data") is not None:
+                write_all(entry["data"])
+            if entry.get("layers") is not None:
+                write_layers(entry["layers"])
+        else:
+            write_all(entry)
+
     @app.post("/api/undo")
     def api_undo():
         nonlocal undo_stack, redo_stack
         if not undo_stack:
             return jsonify({"error": "nothing to undo"}), 400
-        current = read_all()
         state = undo_stack.pop()
-        redo_stack.append(deepcopy(current))
-        write_all(state)
+        redo_stack.append(_history_snapshot())
+        _restore_history(state)
         return jsonify({"ok": True})
 
     @app.post("/api/redo")
@@ -366,10 +461,9 @@ def create_app() -> Flask:
         nonlocal undo_stack, redo_stack
         if not redo_stack:
             return jsonify({"error": "nothing to redo"}), 400
-        current = read_all()
         state = redo_stack.pop()
-        undo_stack.append(deepcopy(current))
-        write_all(state)
+        undo_stack.append(_history_snapshot())
+        _restore_history(state)
         return jsonify({"ok": True})
 
     @app.get("/api/history")
@@ -445,14 +539,10 @@ def create_app() -> Flask:
             "autoEdgeOverrides": {},
             "groups": [],
         }
-        write_with_undo(new_data, prev)
-        # 画布清空后图层定义保留，但成员与排版引用需清空
-        doc = read_layers()
-        for layer in doc.get("layers", []):
-            if layer.get("kind") == "layer":
-                layer["members"] = []
-                layer["positions"] = {}
-        write_layers(doc)
+        write_with_undo(new_data, prev, deepcopy(read_layers()))
+        # 新建画布等于全新工程：图层/文件夹定义也一并清空，
+        # 避免图层窗残留一堆成员为 0 的空壳（需要时由导入的 JSON 恢复）。
+        write_layers({"layers": []})
         return jsonify({"ok": True})
 
     # Groups CRUD
@@ -777,6 +867,51 @@ def create_app() -> Flask:
         if created:
             write_layers(doc)
         return jsonify({"ok": True, "created": len(created), "layers": created})
+
+    # 从编组「导入」到图层窗：按编组把成员和位置同步进图层窗。
+    # 与 migrate-from-groups 的区别：migrate 只在首次生成，遇到已存在的 sourceGroup 会跳过；
+    # 本接口显式按编组刷新已关联的图层成员（修复导出/导入后图层成员被清空的旧数据），
+    # 并为尚无对应图层的编组补建图层。文件夹结构与手动新增的图层不受影响。
+    @app.post("/api/layers/import-from-groups")
+    def import_layers_from_groups():
+        doc = read_layers()
+        layers = doc.setdefault("layers", [])
+        data = read_all()
+        node_pos = {n.get("id"): n.get("position") for n in data.get("nodes", [])}
+        created = 0
+        refreshed = 0
+        member_total = 0
+        for g in data.get("groups", []) or []:
+            gid = g.get("id")
+            members = [m for m in (g.get("members") or []) if isinstance(m, str)]
+            positions = {}
+            for mid in members:
+                p = node_pos.get(mid)
+                if isinstance(p, dict) and isinstance(p.get("x"), (int, float)) and isinstance(p.get("y"), (int, float)):
+                    positions[mid] = {"x": p["x"], "y": p["y"]}
+            # 已关联图层：刷新成员与位置（保留其所在文件夹 parentId 不变）
+            existing = next((l for l in layers if l.get("sourceGroup") == gid and l.get("kind") == "layer"), None)
+            if existing:
+                existing["members"] = list(members)
+                existing["positions"] = positions
+                existing["label"] = str(g.get("label") or existing.get("label") or "编组")
+                if isinstance(g.get("color"), str) and g.get("color"):
+                    existing["color"] = g["color"]
+                if isinstance(g.get("opacity"), (int, float)):
+                    existing["opacity"] = float(g["opacity"])
+                refreshed += 1
+            else:
+                layers.append({
+                    "id": new_id(), "label": str(g.get("label") or "编组"), "kind": "layer",
+                    "parentId": None, "color": str(g.get("color") or "#3b82f6"),
+                    "opacity": float(g.get("opacity")) if isinstance(g.get("opacity"), (int, float)) else 0.08,
+                    "members": list(members), "positions": positions, "sourceGroup": gid,
+                })
+                created += 1
+            member_total += len(members)
+        if created or refreshed:
+            write_layers(doc)
+        return jsonify({"ok": True, "created": created, "refreshed": refreshed, "members": member_total})
 
     return app
 

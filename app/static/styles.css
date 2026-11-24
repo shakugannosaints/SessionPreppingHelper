@@ -35,6 +35,8 @@ aside { padding: 12px; border-right: 1px solid #eee; overflow: auto; }
 }
 .group-manager { width: min(720px, 86vw); }
 .group-manager-head { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.group-import-btn { border-color: #2563eb; color: #1d4ed8; font-weight: 600; }
+html.dark .group-import-btn { border-color: #60a5fa; color: #93c5fd; }
 .group-manager-body { display: grid; grid-template-columns: 220px minmax(280px, 1fr); gap: 10px; align-items: start; }
 .group-manager-list-wrap { border: 1px solid #e5e7eb; border-radius: 8px; max-height: 320px; overflow: auto; background: #fafafa; }
 .group-manager-list { display: flex; flex-direction: column; }
